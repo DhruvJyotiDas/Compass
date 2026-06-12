@@ -14,8 +14,20 @@ class Settings(BaseSettings):
 
     admin_secret: str = "dev-admin-secret"
 
+    # CORS — comma-separated origins, "*" for dev only
+    cors_origins: str = "*"
+
+    # HMAC replay protection — reject callbacks older than this (seconds)
+    hmac_max_age_seconds: int = 300
+
     # chaos profile exposed via env so channel-service can read it
     chaos_profile: str = "calm"  # calm | realistic | hostile
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        if self.cors_origins.strip() == "*":
+            return ["*"]
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
 
 settings = Settings()

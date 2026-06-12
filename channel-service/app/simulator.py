@@ -60,7 +60,7 @@ def set_profile(name: str) -> dict:
 
 
 def _sign(body: bytes, secret: str) -> str:
-    return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()  # type: ignore[attr-defined]
+    return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
 
 async def _send_callback(

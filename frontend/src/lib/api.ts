@@ -14,6 +14,9 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  meta: () =>
+    apiFetch<{ model: string; provider: string; version: string; cache_hit_rate_pct: number; total_ai_calls: number; tokens_saved: number }>("/api/meta"),
+
   // Pipeline
   runPipeline: (goalText: string) =>
     apiFetch<{ pipeline_id: string; campaign_id: string; steps: Record<string, unknown> }>("/pipelines", {

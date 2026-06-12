@@ -1,4 +1,4 @@
-"""5-step Claude AI pipeline with prompt caching and per-step streaming."""
+"""5-step Claude AI pipeline with prompt caching, tool_use structured output, and citation validation."""
 import json
 import re
 import time
@@ -6,7 +6,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from app.ai.client import MODEL, client
 from app.ai.schemas import (
@@ -16,7 +16,6 @@ from app.ai.schemas import (
     MessageCopyOutput,
     SegmentDSLOutput,
 )
-from app.config import settings
 
 # ── System prompt (cached — sent once, reused across calls) ───────────────────
 _SYSTEM_PROMPT = """You are Compass, an AI assistant for a Direct-to-Consumer marketing CRM.
@@ -32,44 +31,82 @@ Rules you must follow:
 2. Message copy uses {{token}} placeholders only: {{first_name}}, {{last_order}}, {{discount}}, {{expiry}}, {{brand_name}}.
 3. Segment filters must only use the fields listed above.
 4. split_pct values across variants must sum exactly to 100.
-5. Return valid JSON matching the schema requested. No prose, no markdown fences.
+5. You will be asked to call a tool. The tool's input schema defines the exact output you must produce.
 """
-
-STEPS = ["intent", "segment_dsl", "campaign_plan", "message_copy", "insights"]
 
 
 def _cache_text(text: str) -> dict:
+    """Mark a text block as cacheable (ephemeral 5-min cache)."""
     return {"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}
 
 
-async def _call_claude(user_content: str, schema_example: str) -> tuple[str, int]:
-    """Call Claude with prompt caching on the system prompt."""
+def _strip_fences(raw: str) -> str:
+    raw = raw.strip()
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+    return raw
+
+
+async def _call_claude_tool(
+    user_content: str,
+    tool_name: str,
+    tool_description: str,
+    schema: BaseModel,
+) -> tuple[dict, dict]:
+    """
+    Call Claude with tool_use forcing structured output.
+
+    Returns (output_dict, meta_dict) where meta_dict contains:
+      latency_ms, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+    """
+    json_schema = schema.model_json_schema()
+    # Anthropic tool input_schema doesn't accept $defs at top level — flatten if needed
+    # but for our schemas this works as-is.
+
     t0 = time.monotonic()
     response = await client.messages.create(
         model=MODEL,
         max_tokens=2048,
         system=[_cache_text(_SYSTEM_PROMPT)],
-        messages=[
+        tools=[
             {
-                "role": "user",
-                "content": f"{user_content}\n\nReturn ONLY valid JSON matching this schema:\n{schema_example}",
+                "name": tool_name,
+                "description": tool_description,
+                "input_schema": json_schema,
             }
         ],
+        tool_choice={"type": "tool", "name": tool_name},
+        messages=[{"role": "user", "content": user_content}],
     )
     latency_ms = int((time.monotonic() - t0) * 1000)
-    raw = response.content[0].text.strip()
-    # Strip any accidental markdown fences
-    raw = re.sub(r"^```(?:json)?\s*", "", raw)
-    raw = re.sub(r"\s*```$", "", raw)
-    return raw, latency_ms
+
+    # Extract tool_use block
+    output: dict = {}
+    for block in response.content:
+        if block.type == "tool_use" and block.name == tool_name:
+            output = block.input
+            break
+
+    usage = response.usage
+    meta = {
+        "latency_ms": latency_ms,
+        "input_tokens": getattr(usage, "input_tokens", 0),
+        "output_tokens": getattr(usage, "output_tokens", 0),
+        "cache_read_tokens": getattr(usage, "cache_read_input_tokens", 0),
+        "cache_creation_tokens": getattr(usage, "cache_creation_input_tokens", 0),
+    }
+    return output, meta
 
 
 def _extract_numbers(text: str) -> set[float]:
+    """Pull numeric values (incl. percentages and currency-stripped) from a string."""
     return {float(m) for m in re.findall(r"\d+(?:\.\d+)?", text)}
 
 
 def _validate_citations(findings: list[str], stats: dict) -> bool:
-    """Ensure every number in insights findings actually appears in the input stats."""
+    """Ensure every number cited in insights findings actually appears in input stats.
+    Citation guard against AI hallucination. Pass if no numbers cited.
+    """
     stat_numbers = _extract_numbers(json.dumps(stats))
     for finding in findings:
         cited = _extract_numbers(finding)
@@ -78,74 +115,80 @@ def _validate_citations(findings: list[str], stats: dict) -> bool:
     return True
 
 
+async def _safe_validate(model_cls, output: dict):
+    try:
+        return model_cls.model_validate(output), True
+    except (ValidationError, Exception):
+        return None, False
+
+
 async def run_pipeline(
     goal_text: str,
     audience_summary: dict | None = None,
 ) -> AsyncGenerator[dict, None]:
     """
-    Yields step events: {pipeline_id, step, output, latency_ms, valid}
-    Steps 1-4 run sequentially. Step 5 (insights) is called separately after dispatch.
+    Yields step events: {pipeline_id, step, output, meta, valid}
+    Steps 1-4 run sequentially. Step 5 (insights) is called separately.
     """
     pipeline_id = str(uuid.uuid4())
     context: dict[str, Any] = {}
 
     # ── Step 1: Intent ────────────────────────────────────────────────────────
-    schema = IntentOutput.model_json_schema()
-    raw, latency = await _call_claude(
+    output, meta = await _call_claude_tool(
         f"Goal: {goal_text}\n\nClassify the marketer's intent and extract campaign parameters.",
-        json.dumps(schema, indent=2),
+        "set_campaign_intent",
+        "Classify campaign intent, urgency, channels, audience description, KPIs, and a short campaign name.",
+        IntentOutput,
     )
-    try:
-        intent_out = IntentOutput.model_validate_json(raw)
-        context["intent"] = intent_out.model_dump()
-        yield {"pipeline_id": pipeline_id, "step": "intent", "output": context["intent"], "latency_ms": latency, "valid": True}
-    except (ValidationError, Exception) as e:
-        fallback = IntentOutput(
+    parsed, valid = await _safe_validate(IntentOutput, output)
+    if not valid:
+        parsed = IntentOutput(
             intent="win_back_inactive", urgency="medium", channels=["whatsapp", "email"],
             audience_description="Inactive customers", kpis=["open_rate", "conversions"],
             campaign_name="Re-engagement Campaign",
         )
-        context["intent"] = fallback.model_dump()
-        yield {"pipeline_id": pipeline_id, "step": "intent", "output": context["intent"], "latency_ms": latency, "valid": False}
+    context["intent"] = parsed.model_dump()
+    yield {"pipeline_id": pipeline_id, "step": "intent", "output": context["intent"], "meta": meta, "valid": valid}
 
     # ── Step 2: Segment DSL ───────────────────────────────────────────────────
     prompt = (
         f"Goal: {goal_text}\n"
         f"Intent: {json.dumps(context['intent'])}\n\n"
-        "Generate the segment DSL using ONLY the allowed fields: last_order_at, lifetime_spend, order_count."
+        "Generate the segment DSL using ONLY the allowed fields: last_order_at, lifetime_spend, order_count. "
+        "Use at most 4 filters."
     )
-    schema = SegmentDSLOutput.model_json_schema()
-    raw, latency = await _call_claude(prompt, json.dumps(schema, indent=2))
-    try:
-        dsl_out = SegmentDSLOutput.model_validate_json(raw)
-        context["segment_dsl"] = dsl_out.model_dump()
-        yield {"pipeline_id": pipeline_id, "step": "segment_dsl", "output": context["segment_dsl"], "latency_ms": latency, "valid": True}
-    except (ValidationError, Exception):
-        fallback = SegmentDSLOutput(
+    output, meta = await _call_claude_tool(
+        prompt, "set_segment_dsl",
+        "Define the segment DSL: list of filters with field/op/value, logic operator, and a one-line audience description.",
+        SegmentDSLOutput,
+    )
+    parsed, valid = await _safe_validate(SegmentDSLOutput, output)
+    if not valid:
+        parsed = SegmentDSLOutput(
             filters=[{"field": "last_order_at", "op": "days_ago_gt", "value": 60}],
             logic="AND",
             audience_description="Customers inactive for 60+ days",
         )
-        context["segment_dsl"] = fallback.model_dump()
-        yield {"pipeline_id": pipeline_id, "step": "segment_dsl", "output": context["segment_dsl"], "latency_ms": latency, "valid": False}
+    context["segment_dsl"] = parsed.model_dump()
+    yield {"pipeline_id": pipeline_id, "step": "segment_dsl", "output": context["segment_dsl"], "meta": meta, "valid": valid}
 
     # ── Step 3: Campaign Plan ─────────────────────────────────────────────────
-    # Only send aggregates — zero PII
     aud = audience_summary or {"count": "unknown", "avg_spend": "unknown"}
     prompt = (
         f"Goal: {goal_text}\n"
         f"Intent: {json.dumps(context['intent'])}\n"
-        f"Audience summary (aggregates only): {json.dumps(aud)}\n\n"
-        "Design the campaign plan: channels, A/B split, guardrails."
+        f"Audience summary (aggregates only, NO PII): {json.dumps(aud)}\n\n"
+        "Design the campaign plan: pick 1-2 channels with an A/B split summing to 100%, "
+        "include guardrails (send window, daily cap), and a short rationale."
     )
-    schema = CampaignPlanOutput.model_json_schema()
-    raw, latency = await _call_claude(prompt, json.dumps(schema, indent=2))
-    try:
-        plan_out = CampaignPlanOutput.model_validate_json(raw)
-        context["plan"] = plan_out.model_dump()
-        yield {"pipeline_id": pipeline_id, "step": "campaign_plan", "output": context["plan"], "latency_ms": latency, "valid": True}
-    except (ValidationError, Exception):
-        fallback = CampaignPlanOutput(
+    output, meta = await _call_claude_tool(
+        prompt, "set_campaign_plan",
+        "Define the campaign plan: variants with channel and split_pct (sum to 100), send window, daily cap, rationale.",
+        CampaignPlanOutput,
+    )
+    parsed, valid = await _safe_validate(CampaignPlanOutput, output)
+    if not valid:
+        parsed = CampaignPlanOutput(
             variants=[
                 {"variant_id": "A", "channel": "whatsapp", "split_pct": 50, "name": "WhatsApp Outreach"},
                 {"variant_id": "B", "channel": "email", "split_pct": 50, "name": "Email Re-engagement"},
@@ -153,27 +196,26 @@ async def run_pipeline(
             ab_test=True, send_window="09:00-21:00 IST", daily_cap=5000,
             rationale="Default balanced split across WhatsApp and Email.",
         )
-        context["plan"] = fallback.model_dump()
-        yield {"pipeline_id": pipeline_id, "step": "campaign_plan", "output": context["plan"], "latency_ms": latency, "valid": False}
+    context["plan"] = parsed.model_dump()
+    yield {"pipeline_id": pipeline_id, "step": "campaign_plan", "output": context["plan"], "meta": meta, "valid": valid}
 
     # ── Step 4: Message Copy ──────────────────────────────────────────────────
-    # Copywriter sees ZERO individual customer data — only segment description
     prompt = (
         f"Plan: {json.dumps(context['plan'])}\n"
         f"Audience: {context['segment_dsl']['audience_description']}\n"
         f"Brand: A D2C fashion/lifestyle brand (India).\n\n"
         "Write personalised message copy for each variant. "
         "Use ONLY these tokens: {{first_name}}, {{last_order}}, {{discount}}, {{expiry}}, {{brand_name}}. "
-        "WhatsApp: max 300 chars. Email: subject + body."
+        "WhatsApp: max 300 chars, no subject. Email: subject + body."
     )
-    schema = MessageCopyOutput.model_json_schema()
-    raw, latency = await _call_claude(prompt, json.dumps(schema, indent=2))
-    try:
-        copy_out = MessageCopyOutput.model_validate_json(raw)
-        context["message_variants"] = copy_out.model_dump()["variants"]
-        yield {"pipeline_id": pipeline_id, "step": "message_copy", "output": {"variants": context["message_variants"]}, "latency_ms": latency, "valid": True}
-    except (ValidationError, Exception):
-        context["message_variants"] = [
+    output, meta = await _call_claude_tool(
+        prompt, "set_message_copy",
+        "Write message variants with body, optional subject (email only), and list of tokens used.",
+        MessageCopyOutput,
+    )
+    parsed, valid = await _safe_validate(MessageCopyOutput, output)
+    if not valid:
+        parsed = MessageCopyOutput(variants=[
             {"variant_id": "A", "channel": "whatsapp", "subject": None,
              "body": "Hi {{first_name}}! It's been a while — we miss you. Here's a special offer just for you 🎁 Use code {{discount}} before {{expiry}}.",
              "tokens_used": ["{{first_name}}", "{{discount}}", "{{expiry}}"]},
@@ -181,40 +223,40 @@ async def run_pipeline(
              "subject": "{{first_name}}, a little something to welcome you back",
              "body": "Hi {{first_name}},\n\nWe noticed you haven't ordered since {{last_order}}. We'd love to have you back!\n\nUse {{discount}} at checkout — valid until {{expiry}}.\n\nWarm regards,\n{{brand_name}} Team",
              "tokens_used": ["{{first_name}}", "{{last_order}}", "{{discount}}", "{{expiry}}", "{{brand_name}}"]},
-        ]
-        yield {"pipeline_id": pipeline_id, "step": "message_copy", "output": {"variants": context["message_variants"]}, "latency_ms": latency, "valid": False}
+        ])
+    context["message_variants"] = parsed.model_dump()["variants"]
+    yield {"pipeline_id": pipeline_id, "step": "message_copy", "output": {"variants": context["message_variants"]}, "meta": meta, "valid": valid}
 
-    yield {"pipeline_id": pipeline_id, "step": "done", "output": context, "latency_ms": 0, "valid": True}
+    yield {"pipeline_id": pipeline_id, "step": "done", "output": context, "meta": {"latency_ms": 0}, "valid": True}
 
 
 async def run_insights(campaign_id: str, stats: dict) -> dict:
     """Step 5: Post-campaign AI insights with citation validation."""
     prompt = (
         f"Campaign stats: {json.dumps(stats)}\n\n"
-        "Analyse campaign performance and produce findings with a recommended next action. "
-        "Every number you cite in findings MUST appear in the stats above."
+        "Analyse campaign performance and produce findings with a recommended next action and a pre-filled "
+        "goal for a follow-up campaign. Every number you cite in findings MUST appear in the stats above."
     )
-    schema = InsightsOutput.model_json_schema()
 
     for attempt in range(2):
-        raw, latency = await _call_claude(prompt, json.dumps(schema, indent=2))
-        try:
-            out = InsightsOutput.model_validate_json(raw)
-            valid = _validate_citations(out.findings, stats)
-            if valid or attempt == 1:
-                return {"output": out.model_dump(), "valid": valid, "latency_ms": latency}
-        except (ValidationError, Exception):
-            pass
+        output, meta = await _call_claude_tool(
+            prompt, "set_insights",
+            "Produce post-campaign findings (citing real numbers), a next_action, a pre-filled next_goal, confidence, and best_variant.",
+            InsightsOutput,
+        )
+        parsed, valid_schema = await _safe_validate(InsightsOutput, output)
+        if valid_schema and parsed:
+            valid_citations = _validate_citations(parsed.findings, stats)
+            if valid_citations or attempt == 1:
+                return {"output": parsed.model_dump(), "valid": valid_citations, "meta": meta}
 
-    # Fallback template
-    return {
-        "output": InsightsOutput(
-            findings=[f"Campaign reached {stats.get('sent', 0)} customers."],
-            next_action="Review delivery rates and plan follow-up.",
-            next_goal="Follow up with customers who opened but didn't click",
-            confidence="low",
-            best_variant=None,
-        ).model_dump(),
-        "valid": False,
-        "latency_ms": 0,
-    }
+    # Deterministic fallback
+    sent = stats.get("sent", 0)
+    fb = InsightsOutput(
+        findings=[f"Campaign reached {sent} customers."],
+        next_action="Review delivery rates and plan follow-up.",
+        next_goal="Follow up with customers who opened but didn't click",
+        confidence="low",
+        best_variant=None,
+    )
+    return {"output": fb.model_dump(), "valid": False, "meta": {"latency_ms": 0, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0}}

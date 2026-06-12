@@ -1,15 +1,12 @@
 """Campaign endpoints: create, read, approve (dispatch), insights."""
-import uuid
-from datetime import datetime, timezone
-
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select, text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import AIRun, Campaign, Communication, Customer, OutboxJob
+from app.models import AIRun, Campaign, Communication, OutboxJob
 from app.routers.segments import _build_sql
-from app.schemas import ApproveRequest, CampaignOut, DSLFilter, SegmentDSL
+from app.schemas import ApproveRequest, CampaignOut, DSLFilter
 
 router = APIRouter(prefix="/campaigns", tags=["campaigns"])
 
@@ -114,20 +111,28 @@ async def approve_campaign(
     return {"status": "approved", "audience_count": total, "campaign_id": campaign_id}
 
 
-@router.get("/{campaign_id}/stats")
-async def get_stats(campaign_id: str, db: AsyncSession = Depends(get_db)):
+async def _compute_stats(campaign_id: str, db: AsyncSession) -> dict:
+    """Compute cumulative funnel stats from events table, not current status.
+
+    Funnel semantics: a comm that reached 'clicked' should count as
+    delivered+opened+clicked, not just clicked.
+    """
     stats_sql = text("""
         SELECT
-            COUNT(*) FILTER (WHERE status != 'pending') AS sent,
-            COUNT(*) FILTER (WHERE status = 'delivered') AS delivered,
-            COUNT(*) FILTER (WHERE status IN ('opened','read','clicked')) AS opened,
-            COUNT(*) FILTER (WHERE status = 'read') AS read,
-            COUNT(*) FILTER (WHERE status = 'clicked') AS clicked,
-            COUNT(*) FILTER (WHERE status = 'failed') AS failed,
-            COUNT(*) AS total
-        FROM communications WHERE campaign_id = :cid
+            COUNT(DISTINCT ce.communication_id) FILTER (WHERE ce.event_type IN ('sent','delivered','opened','read','clicked')) AS sent,
+            COUNT(DISTINCT ce.communication_id) FILTER (WHERE ce.event_type IN ('delivered','opened','read','clicked')) AS delivered,
+            COUNT(DISTINCT ce.communication_id) FILTER (WHERE ce.event_type IN ('opened','read','clicked')) AS opened,
+            COUNT(DISTINCT ce.communication_id) FILTER (WHERE ce.event_type IN ('read','clicked')) AS read,
+            COUNT(DISTINCT ce.communication_id) FILTER (WHERE ce.event_type = 'clicked') AS clicked,
+            COUNT(DISTINCT ce.communication_id) FILTER (WHERE ce.event_type = 'failed') AS failed
+        FROM communication_events ce
+        JOIN communications c ON c.id = ce.communication_id
+        WHERE c.campaign_id = :cid
     """)
     row = (await db.execute(stats_sql, {"cid": campaign_id})).fetchone()
+
+    total_sql = text("SELECT COUNT(*) FROM communications WHERE campaign_id = :cid")
+    total = (await db.execute(total_sql, {"cid": campaign_id})).scalar() or 0
 
     dlq_sql = text(
         "SELECT COUNT(*) FROM outbox_jobs oj "
@@ -153,8 +158,13 @@ async def get_stats(campaign_id: str, db: AsyncSession = Depends(get_db)):
         "failed": row.failed or 0,
         "converted": converted,
         "dlq_count": dlq_count,
-        "total": row.total or 0,
+        "total": total,
     }
+
+
+@router.get("/{campaign_id}/stats")
+async def get_stats(campaign_id: str, db: AsyncSession = Depends(get_db)):
+    return await _compute_stats(campaign_id, db)
 
 
 @router.post("/{campaign_id}/insights")
@@ -167,20 +177,20 @@ async def generate_insights(campaign_id: str, db: AsyncSession = Depends(get_db)
     if not campaign:
         raise HTTPException(404)
 
-    # Get stats
-    stats_result = await get_stats(campaign_id, db)
+    stats_result = await _compute_stats(campaign_id, db)
 
     insight_result = await run_insights(campaign_id, stats_result)
     campaign.insights = insight_result["output"]
     campaign.status = "completed"
 
+    meta = insight_result.get("meta", {})
     run = AIRun(
         campaign_id=campaign_id,
         step="insights",
         input=stats_result,
-        output=insight_result["output"],
+        output={**insight_result["output"], "_meta": meta},
         valid=insight_result["valid"],
-        latency_ms=insight_result["latency_ms"],
+        latency_ms=meta.get("latency_ms", 0),
         model="claude-sonnet-4-6",
     )
     db.add(run)

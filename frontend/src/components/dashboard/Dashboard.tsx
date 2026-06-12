@@ -1,9 +1,9 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, Campaign, CampaignStats, InsightsOutput } from "@/lib/api";
 import { useSSE } from "@/lib/sse";
-import { cx, fmt, inr, Icon, ML, ChannelIcon, useCountUp } from "@/components/ui";
+import { fmt, Icon, ML, ChannelIcon, useCountUp } from "@/components/ui";
 
 interface LiveEvent {
   communication_id: string;

@@ -1,7 +1,8 @@
 "use client";
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
-import { cx, fmt, Icon, ML } from "@/components/ui";
+import { useGlobalEventStream } from "@/lib/sse";
+import { fmt, Icon, ML } from "@/components/ui";
 
 const PROFILES = [
   {
@@ -40,6 +41,8 @@ export default function Chaos() {
   const [dupCount, setDupCount] = useState(0);
   const [reorderCount, setReorderCount] = useState(0);
   const [failCount, setFailCount] = useState(0);
+  const realEvents = useGlobalEventStream(true);
+  const [lastEventCount, setLastEventCount] = useState(0);
 
   useEffect(() => {
     api.getChaosProfile()
@@ -67,43 +70,34 @@ export default function Chaos() {
     setUpdating(false);
   };
 
-  // Simulate log entries for demo (in production these come from SSE)
+  // Consume real receipt events from the global SSE feed
   useEffect(() => {
-    const p = PROFILES.find(p => p.name === active);
-    if (!p) return;
+    if (realEvents.length <= lastEventCount) return;
+    const newEvents = realEvents.slice(0, realEvents.length - lastEventCount);
+    setLastEventCount(realEvents.length);
 
-    const events = ["delivered", "opened", "clicked", "failed", "delivered", "delivered", "opened"];
-    let idx = 0;
-
-    const iv = setInterval(() => {
-      const event = events[idx % events.length];
-      idx++;
-      const isDup = Math.random() < p.dup / 100;
-      const isFail = event === "failed" || Math.random() < p.fail / 100;
-      const isReorder = Math.random() < p.reorder / 100;
-
-      const now = new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-      const comm_id = `c_${Math.floor(Math.random() * 9999).toString().padStart(4, "0")}`;
-      const status = isDup ? 200 : 200;
-      const note = isDup ? "duplicate · constraint-deduped" : isReorder ? "reordered · precedence-resolved" : isFail ? "failed" : undefined;
-      const color = isDup ? "var(--fg-faint)" : isFail ? "var(--red)" : isReorder ? "var(--amber)" : "var(--green)";
+    const newLines: LogLine[] = newEvents.map(msg => {
+      const isDup = msg.type === "dup_rejected";
+      const data = msg.data as Record<string, unknown>;
+      const event = isDup ? "dup_rejected" : String(data.event_type || msg.type);
+      const isFail = event === "failed";
+      const color = isDup ? "var(--fg-faint)" : isFail ? "var(--red)" : event === "clicked" ? "var(--amber)" : "var(--green)";
 
       if (isDup) setDupCount(n => n + 1);
-      if (isReorder) setReorderCount(n => n + 1);
       if (isFail) setFailCount(n => n + 1);
 
-      setLog(prev => [{
-        timestamp: now,
-        status,
-        event: isDup ? "dup_rejected" : event,
-        comm_id,
-        note,
+      return {
+        timestamp: new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+        status: 200,
+        event,
+        comm_id: String(data.communication_id || "").slice(0, 8),
+        note: isDup ? "duplicate · constraint-deduped" : undefined,
         color,
-      }, ...prev].slice(0, 60));
-    }, active === "hostile" ? 300 : active === "realistic" ? 600 : 1200);
+      };
+    });
 
-    return () => clearInterval(iv);
-  }, [active]);
+    setLog(prev => [...newLines, ...prev].slice(0, 60));
+  }, [realEvents, lastEventCount]);
 
   return (
     <div style={{ maxWidth: 1100, margin: "0 auto", padding: "32px 24px" }}>

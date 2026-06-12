@@ -1,7 +1,9 @@
 "use client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { cx, Icon } from "./index";
+import { useEffect, useState } from "react";
+import { api } from "@/lib/api";
+import { Icon } from "./index";
 
 const SCREENS = [
   { id: "command",   label: "Command Center", href: "/" },
@@ -12,6 +14,14 @@ const SCREENS = [
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const [cacheRate, setCacheRate] = useState<number | null>(null);
+
+  useEffect(() => {
+    const load = () => api.meta().then(m => setCacheRate(m.cache_hit_rate_pct)).catch(() => {});
+    load();
+    const iv = setInterval(load, 30000);
+    return () => clearInterval(iv);
+  }, []);
 
   const activeId = pathname === "/" ? "command"
     : pathname.startsWith("/segment") ? "segment"
@@ -73,6 +83,9 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         <div style={{ display: "flex", alignItems: "center", gap: 9, fontFamily: "var(--mono)", fontSize: 11.5, color: "var(--fg-muted)" }}>
           <span className="live-dot" style={{ width: 7, height: 7, borderRadius: 999, background: "var(--green)" }} />
           <span style={{ color: "var(--fg)" }}>claude-sonnet-4-6</span>
+          {cacheRate !== null && cacheRate > 0 && (
+            <span style={{ color: "var(--accent)" }} title="Prompt cache hit rate">· {cacheRate.toFixed(0)}% cache</span>
+          )}
           <span style={{ color: "var(--fg-faint)" }}>· Anthropic API</span>
         </div>
       </header>

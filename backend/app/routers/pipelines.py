@@ -40,14 +40,23 @@ async def trigger_pipeline(body: PipelineRequest, db: AsyncSession = Depends(get
         steps_data[step] = event
         _pipeline_events[pipeline_id].append(event)
 
-        # Persist each step to ai_runs
+        meta = event.get("meta", {})
+        # Persist each step to ai_runs with token + cache stats
         run = AIRun(
             pipeline_id=pipeline_id,
             step=step,
             input={"goal_text": body.goal_text},
-            output=event["output"],
+            output={
+                **event["output"],
+                "_meta": {
+                    "input_tokens": meta.get("input_tokens", 0),
+                    "output_tokens": meta.get("output_tokens", 0),
+                    "cache_read_tokens": meta.get("cache_read_tokens", 0),
+                    "cache_creation_tokens": meta.get("cache_creation_tokens", 0),
+                },
+            },
             valid=event["valid"],
-            latency_ms=event["latency_ms"],
+            latency_ms=meta.get("latency_ms", 0),
             model="claude-sonnet-4-6",
         )
         db.add(run)

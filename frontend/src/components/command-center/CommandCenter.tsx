@@ -1,8 +1,8 @@
 "use client";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, PipelineStep } from "@/lib/api";
-import { cx, Icon, ML } from "@/components/ui";
+import { api } from "@/lib/api";
+import { Icon, ML } from "@/components/ui";
 
 const EXAMPLE_GOALS = [
   "Win back customers who haven't ordered in 60 days",
@@ -49,13 +49,11 @@ export default function CommandCenter({
   }, [initialGoal]);
 
   useEffect(() => {
-    const w = window as Window & { SpeechRecognition?: unknown; webkitSpeechRecognition?: unknown };
-    setSpeechAvailable(!!(w.SpeechRecognition || w.webkitSpeechRecognition));
+    setSpeechAvailable(!!(window.SpeechRecognition || window.webkitSpeechRecognition));
   }, []);
 
   const handleMic = useCallback(() => {
-    const w = window as Window & { SpeechRecognition?: new () => SpeechRecognition; webkitSpeechRecognition?: new () => SpeechRecognition };
-    const SR = w.SpeechRecognition || w.webkitSpeechRecognition;
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) return;
 
     if (listening) {

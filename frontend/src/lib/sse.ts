@@ -68,3 +68,22 @@ export function usePipelineStream(pipelineId: string | null) {
 
   return { steps, done };
 }
+
+export function useGlobalEventStream(enabled: boolean) {
+  const [events, setEvents] = useState<SSEMessage[]>([]);
+
+  useEffect(() => {
+    if (!enabled) return;
+    const es = new EventSource(`${API}/events/stream`);
+    es.onmessage = (e) => {
+      try {
+        const msg: SSEMessage = JSON.parse(e.data);
+        setEvents((prev) => [msg, ...prev].slice(0, 100));
+      } catch {}
+    };
+    es.onerror = () => es.close();
+    return () => es.close();
+  }, [enabled]);
+
+  return events;
+}
