@@ -1,0 +1,122 @@
+version: "3.9"
+
+services:
+  # ── Reverse proxy ──────────────────────────────────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - frontend
+      - crm-api
+      - channel
+    networks: [compass]
+
+  # ── Frontend ───────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-https://api.${DOMAIN}}
+      - NEXT_PUBLIC_CHANNEL_URL=${NEXT_PUBLIC_CHANNEL_URL:-https://channel.${DOMAIN}}
+      - NEXT_PUBLIC_ADMIN_SECRET=${ADMIN_SECRET}
+      - NODE_ENV=production
+    networks: [compass]
+    depends_on:
+      - crm-api
+
+  # ── CRM API ────────────────────────────────────────────────────────────────
+  crm-api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://compass:${POSTGRES_PASSWORD}@postgres:5432/compass
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-sonnet-4-6}
+      - CHANNEL_SERVICE_URL=http://channel:8001
+      - CHANNEL_HMAC_SECRET=${CHANNEL_HMAC_SECRET}
+      - CRM_RECEIPT_URL=https://api.${DOMAIN}/receipts
+      - ADMIN_SECRET=${ADMIN_SECRET}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [compass]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Outbox worker (same image, different command) ──────────────────────────
+  outbox-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: python -m app.workers.outbox
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://compass:${POSTGRES_PASSWORD}@postgres:5432/compass
+      - CHANNEL_SERVICE_URL=http://channel:8001
+      - CHANNEL_HMAC_SECRET=${CHANNEL_HMAC_SECRET}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      crm-api:
+        condition: service_healthy
+    networks: [compass]
+
+  # ── Channel service ────────────────────────────────────────────────────────
+  channel:
+    build:
+      context: ./channel-service
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8001
+    environment:
+      - CRM_RECEIPT_URL=https://api.${DOMAIN}
+      - CHANNEL_HMAC_SECRET=${CHANNEL_HMAC_SECRET}
+      - CHAOS_PROFILE=calm
+    networks: [compass]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ── PostgreSQL ─────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=compass
+      - POSTGRES_USER=compass
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./backend/migrations/001_initial.sql:/docker-entrypoint-initdb.d/001_initial.sql:ro
+    networks: [compass]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U compass -d compass"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pg_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  compass:
+    driver: bridge
