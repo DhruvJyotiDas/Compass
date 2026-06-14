@@ -2,8 +2,19 @@ import type {
   Account,
   ActivitiesReport,
   Activity,
+  AiCampaign,
+  AiInsights,
+  AiMeta,
+  AiRun,
   AssignmentRule,
+  CampaignStats,
   Case,
+  CompileResponse,
+  Customer,
+  CustomerCard,
+  CustomerDetail,
+  PipelineResult,
+  SegmentFilter,
   Contact,
   CustomField,
   DashboardData,
@@ -336,4 +347,57 @@ export const api = {
     }
     return res.json() as Promise<{ created: number; skipped: number; errors: string[] }>;
   },
+
+  // ════════════════════════════════════════════════════════════════════════
+  //  AI ENGAGEMENT LAYER
+  // ════════════════════════════════════════════════════════════════════════
+
+  // ── Customers / Shoppers ──
+  listCustomers: (p: { limit?: number; offset?: number } = {}) =>
+    request<Customer[]>(`/customers${qs(p)}`),
+  getCustomer: (id: string) => request<CustomerDetail>(`/customers/${id}`),
+  customerAiCard: (id: string) => request<CustomerCard>(`/customers/${id}/ai-card`),
+
+  // ── Segments ──
+  compileSegment: (filters: SegmentFilter[], logic = "AND") =>
+    request<CompileResponse>("/segments/compile", {
+      method: "POST",
+      body: JSON.stringify({ dsl: { filters, logic } }),
+    }),
+  generateSegment: (goal_text: string) =>
+    request<CompileResponse & { dsl: { filters: SegmentFilter[]; logic: string }; audience_description: string; provider: string; valid: boolean }>(
+      "/segments/generate",
+      { method: "POST", body: JSON.stringify({ goal_text }) },
+    ),
+
+  // ── Growth Assistant pipeline ──
+  runPipeline: (goal_text: string) =>
+    request<PipelineResult>("/pipelines", { method: "POST", body: JSON.stringify({ goal_text }) }),
+  pipelineRuns: (pipelineId: string) => request<AiRun[]>(`/pipelines/${pipelineId}/runs`),
+
+  // ── AI Campaigns ──
+  listAiCampaigns: () => request<AiCampaign[]>("/campaigns"),
+  getAiCampaign: (id: string) => request<AiCampaign>(`/campaigns/${id}`),
+  updateAiCampaign: (id: string, b: Partial<AiCampaign>) =>
+    request<AiCampaign>(`/campaigns/${id}`, { method: "PATCH", body: JSON.stringify(b) }),
+  improveCopy: (id: string, instruction?: string) =>
+    request<{ variants: AiCampaign["message_variants"]; provider: string; valid: boolean }>(
+      `/campaigns/${id}/improve-copy`,
+      { method: "POST", body: JSON.stringify({ instruction }) },
+    ),
+  approveAiCampaign: (id: string, segment_dsl?: { filters: SegmentFilter[]; logic?: string }) =>
+    request<{ status: string; audience_count: number; campaign_id: string }>(
+      `/campaigns/${id}/approve`,
+      { method: "POST", body: JSON.stringify(segment_dsl ? { segment_dsl } : {}) },
+    ),
+  campaignStats: (id: string) => request<CampaignStats>(`/campaigns/${id}/stats`),
+  campaignInsights: (id: string) =>
+    request<AiInsights>(`/campaigns/${id}/insights`, { method: "POST" }),
+  campaignCommunications: (id: string) =>
+    request<
+      { id: string; customer_name: string; channel: string; variant: string; status: string; job_status: string; attempts: number }[]
+    >(`/campaigns/${id}/communications`),
+
+  // ── Meta (provider, model, AI call stats) ──
+  aiMeta: () => request<AiMeta>("/api/meta"),
 };

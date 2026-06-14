@@ -1,7 +1,8 @@
 "use client";
 
-import { LogOut, User as UserIcon } from "lucide-react";
+import { LogOut, Sparkles } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -24,6 +25,14 @@ export function Topbar() {
       <div className="flex-1">
         <GlobalSearch />
       </div>
+      <Button
+        variant="outline"
+        size="sm"
+        className="gap-1.5 border-primary/30 text-primary hover:bg-primary/5 hover:text-primary"
+        onClick={() => window.dispatchEvent(new CustomEvent("compass:open-tour"))}
+      >
+        <Sparkles className="h-4 w-4" /> Quick demo
+      </Button>
       <DropdownMenu>
         <DropdownMenuTrigger className="flex items-center gap-2 rounded-full focus:outline-none">
           <Avatar>

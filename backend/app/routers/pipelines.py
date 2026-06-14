@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
 from app.ai.pipeline import run_pipeline
+from app.config import settings
 from app.database import get_db
 from app.models import AIRun, Campaign
 from app.schemas import PipelineRequest
@@ -57,7 +58,7 @@ async def trigger_pipeline(body: PipelineRequest, db: AsyncSession = Depends(get
             },
             valid=event["valid"],
             latency_ms=meta.get("latency_ms", 0),
-            model="claude-sonnet-4-6",
+            model=meta.get("model") or settings.llm_model,
         )
         db.add(run)
 

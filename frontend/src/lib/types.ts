@@ -623,3 +623,150 @@ export interface WebForm {
   created_at: string;
   updated_at?: string | null;
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+//  AI ENGAGEMENT LAYER (Growth Assistant / Customers / Segments / Campaigns)
+// ════════════════════════════════════════════════════════════════════════════
+
+export interface Customer {
+  id: string;
+  external_id: string;
+  name: string;
+  email?: string | null;
+  phone?: string | null;
+  last_order_at?: string | null;
+  order_count: number;
+  lifetime_spend: number;
+  favorite_category?: string | null;
+  engagement_score: number;
+  opted_out: boolean;
+}
+
+export interface CustomerOrder {
+  id: string;
+  external_id: string;
+  amount: number;
+  status: string;
+  created_at: string;
+}
+
+export interface CustomerDetail extends Customer {
+  days_since_last?: number | null;
+  recent_orders: CustomerOrder[];
+}
+
+export interface CustomerSuggestion {
+  label: string;
+  rationale: string;
+}
+
+export interface CustomerCard {
+  summary: string;
+  churn_risk: "low" | "medium" | "high";
+  suggestions: CustomerSuggestion[];
+  provider: string;
+  valid: boolean;
+}
+
+export interface SegmentFilter {
+  field: string;
+  op: string;
+  value: number | string;
+}
+
+export interface MatchTrace {
+  field: string;
+  op: string;
+  value: unknown;
+  actual: unknown;
+  matched: boolean;
+}
+
+export interface SegmentPreviewCustomer {
+  id: string;
+  name: string;
+  email?: string | null;
+  last_order_at?: string | null;
+  lifetime_spend: number;
+  order_count: number;
+  match_trace: MatchTrace[];
+}
+
+export interface CompileResponse {
+  count: number;
+  sql_preview: string;
+  sample: SegmentPreviewCustomer[];
+}
+
+export interface MessageVariant {
+  variant_id: string;
+  channel: string;
+  subject?: string | null;
+  body: string;
+  tokens_used: string[];
+}
+
+export interface AiCampaign {
+  id: string;
+  name?: string | null;
+  goal_text: string;
+  intent?: Record<string, unknown> | null;
+  segment_dsl?: { filters: SegmentFilter[]; logic?: string; audience_description?: string } | null;
+  plan?: Record<string, unknown> | null;
+  message_variants?: MessageVariant[] | null;
+  insights?: AiInsights | null;
+  status: string; // draft | approved | running | completed
+  audience_count?: number | null;
+  pipeline_id?: string | null;
+  created_at: string;
+}
+
+export interface AiInsights {
+  findings: string[];
+  next_action: string;
+  next_goal: string;
+  confidence: string;
+  best_variant?: string | null;
+}
+
+export interface CampaignStats {
+  sent: number;
+  delivered: number;
+  opened: number;
+  read: number;
+  clicked: number;
+  failed: number;
+  converted: number;
+  dlq_count: number;
+  total: number;
+}
+
+export interface PipelineStepResult {
+  output: Record<string, unknown>;
+  latency_ms: number;
+  valid: boolean;
+  meta?: { provider?: string };
+}
+
+export interface PipelineResult {
+  pipeline_id: string;
+  campaign_id: string;
+  steps: Record<string, PipelineStepResult>;
+}
+
+export interface AiRun {
+  step: string;
+  output: Record<string, unknown>;
+  valid: boolean;
+  latency_ms: number;
+  model: string;
+}
+
+export interface AiMeta {
+  model: string;
+  provider: string;
+  version: string;
+  cache_hit_rate_pct: number;
+  total_ai_calls: number;
+  tokens_saved: number;
+}

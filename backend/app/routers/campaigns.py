@@ -1,14 +1,30 @@
-"""Campaign endpoints: create, read, approve (dispatch), insights."""
+"""Campaign endpoints: create, read, edit draft, approve (dispatch), insights."""
+from typing import Any, Optional
+
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.database import get_db
 from app.models import AIRun, Campaign, Communication, OutboxJob
 from app.routers.segments import _build_sql
 from app.schemas import ApproveRequest, CampaignOut, DSLFilter
 
 router = APIRouter(prefix="/campaigns", tags=["campaigns"])
+
+
+class CampaignUpdate(BaseModel):
+    """Marketer edits to a draft campaign artifact before approval."""
+    name: Optional[str] = None
+    plan: Optional[dict] = None
+    segment_dsl: Optional[dict] = None
+    message_variants: Optional[list[Any]] = None
+
+
+class ImproveCopyRequest(BaseModel):
+    instruction: Optional[str] = None
 
 
 @router.get("", response_model=list[CampaignOut])
@@ -24,6 +40,41 @@ async def get_campaign(campaign_id: str, db: AsyncSession = Depends(get_db)):
     if not c:
         raise HTTPException(404, "Campaign not found")
     return c
+
+
+@router.patch("/{campaign_id}", response_model=CampaignOut)
+async def update_campaign(campaign_id: str, body: CampaignUpdate, db: AsyncSession = Depends(get_db)):
+    """Persist marketer edits to a draft campaign (name/plan/segment/messages)."""
+    campaign = (await db.execute(select(Campaign).where(Campaign.id == campaign_id))).scalar_one_or_none()
+    if not campaign:
+        raise HTTPException(404, "Campaign not found")
+    if campaign.status != "draft":
+        raise HTTPException(400, f"Cannot edit a {campaign.status} campaign")
+    for field in ("name", "plan", "segment_dsl", "message_variants"):
+        val = getattr(body, field)
+        if val is not None:
+            setattr(campaign, field, val)
+    await db.commit()
+    await db.refresh(campaign)
+    return campaign
+
+
+@router.post("/{campaign_id}/improve-copy")
+async def improve_copy(campaign_id: str, body: ImproveCopyRequest, db: AsyncSession = Depends(get_db)):
+    """AI: regenerate message copy for a draft campaign (Improve Message / Create Variants)."""
+    from app.ai.campaign_agent import write_copy
+
+    campaign = (await db.execute(select(Campaign).where(Campaign.id == campaign_id))).scalar_one_or_none()
+    if not campaign:
+        raise HTTPException(404, "Campaign not found")
+    if campaign.status != "draft":
+        raise HTTPException(400, f"Cannot edit a {campaign.status} campaign")
+
+    audience = (campaign.segment_dsl or {}).get("audience_description", "the target audience")
+    copy, meta, valid = await write_copy(campaign.plan or {}, audience, instruction=body.instruction)
+    campaign.message_variants = copy["variants"]
+    await db.commit()
+    return {"variants": copy["variants"], "provider": meta.get("provider", "unknown"), "valid": valid}
 
 
 @router.post("/{campaign_id}/approve")
@@ -167,6 +218,30 @@ async def get_stats(campaign_id: str, db: AsyncSession = Depends(get_db)):
     return await _compute_stats(campaign_id, db)
 
 
+@router.get("/{campaign_id}/communications")
+async def list_communications(
+    campaign_id: str, limit: int = 100, db: AsyncSession = Depends(get_db)
+):
+    """Execution monitor feed: per-customer delivery status, retries and DLQ state."""
+    sql = text("""
+        SELECT c.id, cust.name AS customer_name, c.channel, c.variant, c.status,
+               COALESCE(oj.status, 'n/a') AS job_status, COALESCE(oj.attempts, 0) AS attempts
+        FROM communications c
+        JOIN customers cust ON cust.id = c.customer_id
+        LEFT JOIN outbox_jobs oj ON oj.communication_id = c.id
+        WHERE c.campaign_id = :cid
+        ORDER BY c.created_at DESC
+        LIMIT :limit
+    """)
+    rows = (await db.execute(sql, {"cid": campaign_id, "limit": limit})).fetchall()
+    return [
+        {"id": str(r.id), "customer_name": r.customer_name, "channel": r.channel,
+         "variant": r.variant, "status": r.status, "job_status": r.job_status,
+         "attempts": r.attempts}
+        for r in rows
+    ]
+
+
 @router.post("/{campaign_id}/insights")
 async def generate_insights(campaign_id: str, db: AsyncSession = Depends(get_db)):
     """Trigger step-5 insights generation after campaign settles."""
@@ -191,7 +266,7 @@ async def generate_insights(campaign_id: str, db: AsyncSession = Depends(get_db)
         output={**insight_result["output"], "_meta": meta},
         valid=insight_result["valid"],
         latency_ms=meta.get("latency_ms", 0),
-        model="claude-sonnet-4-6",
+        model=meta.get("model") or settings.llm_model,
     )
     db.add(run)
     await db.commit()

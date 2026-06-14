@@ -7,7 +7,7 @@ import { getToken } from "@/lib/api";
 export default function Home() {
   const router = useRouter();
   useEffect(() => {
-    router.replace(getToken() ? "/dashboard" : "/login");
+    router.replace(getToken() ? "/growth" : "/login");
   }, [router]);
   return <div className="flex h-screen items-center justify-center text-muted-foreground">Loading…</div>;
 }

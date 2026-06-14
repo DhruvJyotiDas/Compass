@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Sidebar } from "@/components/shell/Sidebar";
 import { Topbar } from "@/components/shell/Topbar";
+import { WelcomeTour } from "@/components/ai/WelcomeTour";
 import { useAuth } from "@/lib/auth";
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
@@ -25,6 +26,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         <Topbar />
         <main className="flex-1 overflow-y-auto bg-muted/30 p-6">{children}</main>
       </div>
+      <WelcomeTour />
     </div>
   );
 }

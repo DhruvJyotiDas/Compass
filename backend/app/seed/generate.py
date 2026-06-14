@@ -13,6 +13,7 @@ from faker import Faker
 from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert
 
+from app.customer_metrics import CATEGORIES, engagement_update_sql
 from app.database import AsyncSessionLocal
 from app.models import Customer, Order
 
@@ -120,6 +121,7 @@ async def seed(db=None):
             "name": name,
             "email": _random_email(name),
             "phone": _random_phone(),
+            "favorite_category": random.choice(CATEGORIES),
             "opted_out": opted_out,
             "_tier": tier,
             "_last_order_at": last_order_at,
@@ -201,6 +203,11 @@ async def seed(db=None):
         ) sub
         WHERE c.id = sub.customer_id
     """))
+    await db.commit()
+
+    # Compute engagement scores (RFM blend) from the refreshed rollups.
+    print("Computing engagement scores…")
+    await db.execute(text(engagement_update_sql()))
     await db.commit()
 
     # Count results

@@ -27,7 +27,36 @@ class CustomerOut(BaseModel):
     last_order_at: Optional[datetime]
     order_count: int
     lifetime_spend: float
+    favorite_category: Optional[str] = None
+    engagement_score: int = 0
     opted_out: bool
+
+
+class CustomerOrderOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    external_id: str
+    amount: float
+    status: str
+    created_at: datetime
+
+
+class CustomerDetailOut(CustomerOut):
+    days_since_last: Optional[int] = None
+    recent_orders: list[CustomerOrderOut] = Field(default_factory=list)
+
+
+class CustomerSuggestionOut(BaseModel):
+    label: str
+    rationale: str
+
+
+class CustomerCardResponse(BaseModel):
+    summary: str
+    churn_risk: str
+    suggestions: list[CustomerSuggestionOut]
+    provider: str
+    valid: bool
 
 
 class OrderIn(BaseModel):

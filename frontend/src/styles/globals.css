@@ -4,28 +4,31 @@
 
 @layer base {
   :root {
-    --background: 210 20% 98%;
+    --background: 220 24% 97%;
     --foreground: 222 47% 11%;
     --card: 0 0% 100%;
     --card-foreground: 222 47% 11%;
     --popover: 0 0% 100%;
     --popover-foreground: 222 47% 11%;
-    --primary: 243 75% 59%;
+    --primary: 245 75% 60%;
     --primary-foreground: 0 0% 100%;
-    --secondary: 210 40% 96%;
+    --secondary: 220 30% 95%;
     --secondary-foreground: 222 47% 11%;
-    --muted: 210 40% 96%;
+    --muted: 220 26% 95%;
     --muted-foreground: 215 16% 47%;
-    --accent: 243 75% 96%;
-    --accent-foreground: 243 75% 40%;
+    --accent: 255 80% 96%;
+    --accent-foreground: 250 70% 45%;
     --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 100%;
-    --border: 214 32% 91%;
-    --input: 214 32% 91%;
-    --ring: 243 75% 59%;
-    --radius: 0.6rem;
-    --sidebar: 222 47% 11%;
-    --sidebar-foreground: 210 40% 96%;
+    --border: 215 28% 90%;
+    --input: 215 28% 90%;
+    --ring: 245 75% 60%;
+    --radius: 0.7rem;
+    --sidebar: 224 47% 9%;
+    --sidebar-foreground: 215 30% 92%;
+    /* AI accent gradient stops */
+    --ai-from: 245 75% 60%;
+    --ai-to: 280 70% 60%;
   }
 
   * {
@@ -37,7 +40,56 @@
   }
 }
 
+@layer components {
+  /* Indigo→violet gradient text for AI headings */
+  .gradient-text {
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(90deg, hsl(var(--ai-from)), hsl(var(--ai-to)));
+  }
+  /* Soft AI surface used on hero / highlight cards */
+  .ai-surface {
+    background-image:
+      radial-gradient(120% 120% at 0% 0%, hsl(var(--ai-from) / 0.10), transparent 55%),
+      radial-gradient(120% 120% at 100% 0%, hsl(var(--ai-to) / 0.10), transparent 55%);
+  }
+  .ai-gradient {
+    background-image: linear-gradient(135deg, hsl(var(--ai-from)), hsl(var(--ai-to)));
+  }
+  /* Subtle lift on interactive cards */
+  .card-lift {
+    @apply transition-all duration-200;
+  }
+  .card-lift:hover {
+    @apply -translate-y-0.5 shadow-md;
+    border-color: hsl(var(--primary) / 0.35);
+  }
+}
+
+@layer utilities {
+  .animate-fade-in-up {
+    animation: fade-in-up 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .animate-fade-in {
+    animation: fade-in 0.4s ease-out both;
+  }
+}
+
+@keyframes fade-in-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
 /* Thin scrollbars for kanban / lists */
 .scrollbar-thin::-webkit-scrollbar { height: 8px; width: 8px; }
 .scrollbar-thin::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 8px; }
 .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+
+/* App-wide refined scrollbar */
+::-webkit-scrollbar { height: 10px; width: 10px; }
+::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground) / 0.4); }
+::-webkit-scrollbar-track { background: transparent; }

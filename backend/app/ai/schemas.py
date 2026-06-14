@@ -104,3 +104,16 @@ class InsightsOutput(BaseModel):
     next_goal: str  # pre-filled goal for follow-up campaign
     confidence: str  # low|medium|high
     best_variant: Optional[str] = None
+
+
+# ── Customer Card (AI customer intelligence) ───────────────────────────────────
+
+class CustomerSuggestion(BaseModel):
+    label: str       # short action, e.g. "Send comeback discount"
+    rationale: str   # one line why
+
+
+class CustomerCardOutput(BaseModel):
+    summary: str          # 1-2 sentence narrative summary
+    churn_risk: str       # low|medium|high
+    suggestions: list[CustomerSuggestion]

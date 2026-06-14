@@ -125,13 +125,19 @@ app.include_router(import_export.router)
 async def startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    log.info("Compass CRM started — model: %s · cors: %s", settings.gemma_model, settings.cors_origins)
+        # Lightweight dev migrations: add_columns create_all can't (no Alembic in this demo).
+        await conn.execute(text(
+            "ALTER TABLE customers ADD COLUMN IF NOT EXISTS favorite_category VARCHAR(64)"))
+        await conn.execute(text(
+            "ALTER TABLE customers ADD COLUMN IF NOT EXISTS engagement_score INTEGER NOT NULL DEFAULT 0"))
+    log.info("Compass CRM started — LLM: %s (%s) · cors: %s",
+             settings.llm_model, settings.llm_provider_name, settings.cors_origins)
 
 
 @app.get("/healthz")
 async def healthz(db: AsyncSession = Depends(get_db)):
     await db.execute(text("SELECT 1"))
-    return {"status": "ok", "model": settings.gemma_model}
+    return {"status": "ok", "model": settings.llm_model, "provider": settings.llm_provider_name}
 
 
 @app.get("/api/meta")
@@ -156,8 +162,8 @@ async def meta(db: AsyncSession = Depends(get_db)):
         cache_hit_rate = 0.0
 
     return {
-        "model": settings.gemma_model,
-        "provider": "Anthropic API",
+        "model": settings.llm_model,
+        "provider": settings.llm_provider_name,
         "version": "1.0.0",
         "cache_hit_rate_pct": cache_hit_rate,
         "total_ai_calls": total_calls,

@@ -34,6 +34,9 @@ class Customer(Base):
     last_order_at = Column(DateTime(timezone=True))
     order_count = Column(Integer, default=0, nullable=False)
     lifetime_spend = Column(Numeric(12, 2), default=0, nullable=False)
+    # ── Customer intelligence (AI engagement layer) ──
+    favorite_category = Column(String(64))
+    engagement_score = Column(Integer, default=0, nullable=False)  # 0–100 RFM blend
     opted_out = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
