@@ -23,11 +23,12 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-https://api.${DOMAIN}}
+        - NEXT_PUBLIC_CHANNEL_URL=${NEXT_PUBLIC_CHANNEL_URL:-https://channel.${DOMAIN}}
+        - NEXT_PUBLIC_ADMIN_SECRET=${ADMIN_SECRET:-dev-admin-secret}
     restart: unless-stopped
     environment:
-      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-https://api.${DOMAIN}}
-      - NEXT_PUBLIC_CHANNEL_URL=${NEXT_PUBLIC_CHANNEL_URL:-https://channel.${DOMAIN}}
-      - NEXT_PUBLIC_ADMIN_SECRET=${ADMIN_SECRET}
       - NODE_ENV=production
     networks: [compass]
     depends_on:
@@ -42,15 +43,18 @@ services:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
     environment:
       - DATABASE_URL=postgresql+asyncpg://compass:${POSTGRES_PASSWORD}@postgres:5432/compass
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-sonnet-4-6}
+      - OLLAMA_URL=http://ollama:11434
+      - GEMMA_MODEL=${GEMMA_MODEL:-gemma4:e2b}
       - CHANNEL_SERVICE_URL=http://channel:8001
       - CHANNEL_HMAC_SECRET=${CHANNEL_HMAC_SECRET}
       - CRM_RECEIPT_URL=https://api.${DOMAIN}/receipts
       - ADMIN_SECRET=${ADMIN_SECRET}
+      - JWT_SECRET=${JWT_SECRET}
     depends_on:
       postgres:
         condition: service_healthy
+      ollama-setup:
+        condition: service_completed_successfully
     networks: [compass]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
@@ -112,10 +116,37 @@ services:
       timeout: 3s
       retries: 10
 
+  # ── Ollama (local LLM runtime) ─────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    networks: [compass]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  # ── Pull Gemma model on first start ───────────────────────────────────────
+  ollama-setup:
+    image: ollama/ollama:latest
+    restart: "no"
+    networks: [compass]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: ["ollama", "pull", "${GEMMA_MODEL:-gemma4:e2b}"]
+
 volumes:
   pg_data:
   caddy_data:
   caddy_config:
+  ollama_data:
 
 networks:
   compass:

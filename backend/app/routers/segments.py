@@ -2,6 +2,7 @@
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,12 +17,18 @@ from app.schemas import (
 
 router = APIRouter(prefix="/segments", tags=["segments"])
 
+
+class GenerateSegmentRequest(BaseModel):
+    goal_text: str
+
 # ── Field registry ─────────────────────────────────────────────────────────────
 
 FIELD_REGISTRY = {
     "last_order_at": {
-        "days_ago_gt": "NOW() - last_order_at > INTERVAL ':val days'",
-        "days_ago_lt": "NOW() - last_order_at < INTERVAL ':val days'",
+        # NOTE: the bind param must live OUTSIDE any string literal, else asyncpg can't infer its
+        # type ("could not determine data type of parameter"). Use interval multiplication.
+        "days_ago_gt": "last_order_at < NOW() - (:val * INTERVAL '1 day')",
+        "days_ago_lt": "last_order_at > NOW() - (:val * INTERVAL '1 day')",
     },
     "lifetime_spend": {
         "gte": "lifetime_spend >= :val",
@@ -74,6 +81,32 @@ def _build_sql(filters: list[DSLFilter], logic: str = "AND") -> tuple[str, dict]
     joined = f" {logic} ".join(clauses) if clauses else "TRUE"
     where = f"({joined}) AND opted_out = FALSE"
     return where, params
+
+
+@router.post("/generate")
+async def generate_segment(body: GenerateSegmentRequest, db: AsyncSession = Depends(get_db)):
+    """AI: turn a business goal into a segment DSL, then compile it to a live audience preview.
+
+    The AI only proposes filters over allow-listed fields; compilation reuses the safe SQL path.
+    """
+    from app.ai.segment_agent import generate_segment as ai_generate_segment
+
+    dsl, meta, valid = await ai_generate_segment(body.goal_text)
+    filters = [DSLFilter(**f) for f in dsl.get("filters", [])]
+    _validate_dsl(filters)
+    preview = await compile_segment(
+        CompileRequest(dsl={"filters": dsl.get("filters", []), "logic": dsl.get("logic", "AND")}),
+        db,
+    )
+    return {
+        "dsl": dsl,
+        "audience_description": dsl.get("audience_description", ""),
+        "provider": meta.get("provider", "unknown"),
+        "valid": valid,
+        "count": preview.count,
+        "sql_preview": preview.sql_preview,
+        "sample": preview.sample,
+    }
 
 
 @router.post("/compile", response_model=CompileResponse)
