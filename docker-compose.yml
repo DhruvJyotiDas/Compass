@@ -43,8 +43,11 @@ services:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
     environment:
       - DATABASE_URL=postgresql+asyncpg://compass:${POSTGRES_PASSWORD}@postgres:5432/compass
-      - OLLAMA_URL=http://ollama:11434
-      - GEMMA_MODEL=${GEMMA_MODEL:-gemma4:e2b}
+      # Self-hosted Qwen2.5-14B on remote GPU VM (vLLM, OpenAI-compatible, port 80)
+      - LLM_BASE_URL=${LLM_BASE_URL:-http://163.128.34.19/v1}
+      - LLM_MODEL=${LLM_MODEL:-/root/test/models/Qwen2.5-14B-Instruct-AWQ}
+      - LLM_API_KEY=${LLM_API_KEY:-sk-no-auth}
+      - LLM_ENABLED=${LLM_ENABLED:-true}
       - CHANNEL_SERVICE_URL=http://channel:8001
       - CHANNEL_HMAC_SECRET=${CHANNEL_HMAC_SECRET}
       - CRM_RECEIPT_URL=https://api.${DOMAIN}/receipts
@@ -53,8 +56,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      ollama-setup:
-        condition: service_completed_successfully
     networks: [compass]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
@@ -116,37 +117,13 @@ services:
       timeout: 3s
       retries: 10
 
-  # ── Ollama (local LLM runtime) ─────────────────────────────────────────────
-  ollama:
-    image: ollama/ollama:latest
-    restart: unless-stopped
-    volumes:
-      - ollama_data:/root/.ollama
-    networks: [compass]
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 10s
-      timeout: 10s
-      retries: 10
-      start_period: 20s
-
-  # ── Pull Gemma model on first start ───────────────────────────────────────
-  ollama-setup:
-    image: ollama/ollama:latest
-    restart: "no"
-    networks: [compass]
-    depends_on:
-      ollama:
-        condition: service_healthy
-    environment:
-      - OLLAMA_HOST=http://ollama:11434
-    entrypoint: ["ollama", "pull", "${GEMMA_MODEL:-gemma4:e2b}"]
+  # Inference is served by the remote self-hosted Qwen2.5-14B (vLLM) endpoint
+  # configured via LLM_BASE_URL. No local LLM runtime is required.
 
 volumes:
   pg_data:
   caddy_data:
   caddy_config:
-  ollama_data:
 
 networks:
   compass:
