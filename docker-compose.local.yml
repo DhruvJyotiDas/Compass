@@ -1,0 +1,13 @@
+version: "3.9"
+# Local HTTP override — Caddy on :80 routes all traffic, no direct port exposure needed.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+
+services:
+  # Channel service points at crm-api via internal Docker network
+  channel:
+    environment:
+      - CRM_RECEIPT_URL=http://crm-api:8000
+
+  crm-api:
+    environment:
+      - CRM_RECEIPT_URL=http://crm-api:8000/receipts

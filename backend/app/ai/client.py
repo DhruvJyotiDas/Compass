@@ -1,7 +1,7 @@
-"""Single Anthropic client — the only place that knows where inference lives."""
-import anthropic
+"""Ollama client (OpenAI-compatible) — the only place that knows where inference lives."""
+from openai import AsyncOpenAI
 
 from app.config import settings
 
-client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-MODEL = settings.claude_model
+client = AsyncOpenAI(base_url=f"{settings.ollama_url}/v1", api_key="ollama")
+MODEL = settings.gemma_model

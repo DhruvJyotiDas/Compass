@@ -1,1 +1,22 @@
-node_modules/\n.env\n.env.local\n__pycache__/\n*.pyc\n.venv/\nvenv/\n*.egg-info/\n.next/\ndist/\n*.log\n.DS_Store
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+
+# Node / Next.js
+node_modules/
+.next/
+dist/
+next-env.d.ts
+*.tsbuildinfo
+
+# Env / secrets
+.env
+.env.local
+frontend/.env.local
+
+# Misc
+*.log
+.DS_Store

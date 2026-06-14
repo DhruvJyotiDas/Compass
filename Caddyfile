@@ -1,17 +1,11 @@
-# Compass CRM — Caddyfile
-# Replace {$DOMAIN} with your actual domain via env var
+:80 {
+    handle_path /api/* {
+        reverse_proxy localhost:8088 {
+            flush_interval -1
+        }
+    }
 
-app.{$DOMAIN} {
-    reverse_proxy frontend:3000
-}
-
-api.{$DOMAIN} {
-    reverse_proxy crm-api:8000
-    # Allow large SSE connections
-    header_up Connection keep-alive
-}
-
-channel.{$DOMAIN} {
-    # Public on purpose — proves two services talk over real internet
-    reverse_proxy channel:8001
+    handle {
+        reverse_proxy localhost:3000
+    }
 }

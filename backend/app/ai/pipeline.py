@@ -1,4 +1,4 @@
-"""5-step Claude AI pipeline with prompt caching, tool_use structured output, and citation validation."""
+"""5-step Gemma AI pipeline — JSON-mode structured output with citation validation."""
 import json
 import re
 import time
@@ -17,7 +17,6 @@ from app.ai.schemas import (
     SegmentDSLOutput,
 )
 
-# ── System prompt (cached — sent once, reused across calls) ───────────────────
 _SYSTEM_PROMPT = """You are Compass, an AI assistant for a Direct-to-Consumer marketing CRM.
 You help brand marketers plan and execute campaigns by analysing their goals and customer data.
 
@@ -31,13 +30,7 @@ Rules you must follow:
 2. Message copy uses {{token}} placeholders only: {{first_name}}, {{last_order}}, {{discount}}, {{expiry}}, {{brand_name}}.
 3. Segment filters must only use the fields listed above.
 4. split_pct values across variants must sum exactly to 100.
-5. You will be asked to call a tool. The tool's input schema defines the exact output you must produce.
-"""
-
-
-def _cache_text(text: str) -> dict:
-    """Mark a text block as cacheable (ephemeral 5-min cache)."""
-    return {"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}
+5. Respond with ONLY a valid JSON object matching the schema given. No markdown, no explanation."""
 
 
 def _strip_fences(raw: str) -> str:
@@ -47,66 +40,53 @@ def _strip_fences(raw: str) -> str:
     return raw
 
 
-async def _call_claude_tool(
+async def _call_gemma_json(
     user_content: str,
-    tool_name: str,
     tool_description: str,
-    schema: BaseModel,
+    schema: type[BaseModel],
 ) -> tuple[dict, dict]:
     """
-    Call Claude with tool_use forcing structured output.
-
-    Returns (output_dict, meta_dict) where meta_dict contains:
-      latency_ms, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+    Call Gemma via Ollama with JSON mode.
+    Returns (output_dict, meta_dict).
     """
     json_schema = schema.model_json_schema()
-    # Anthropic tool input_schema doesn't accept $defs at top level — flatten if needed
-    # but for our schemas this works as-is.
+    schema_str = json.dumps(json_schema, indent=2)
+
+    prompt = (
+        f"{_SYSTEM_PROMPT}\n\n"
+        f"Task: {tool_description}\n\n"
+        f"JSON schema to follow exactly:\n{schema_str}\n\n"
+        f"{user_content}"
+    )
 
     t0 = time.monotonic()
-    response = await client.messages.create(
+    response = await client.chat.completions.create(
         model=MODEL,
-        max_tokens=2048,
-        system=[_cache_text(_SYSTEM_PROMPT)],
-        tools=[
-            {
-                "name": tool_name,
-                "description": tool_description,
-                "input_schema": json_schema,
-            }
-        ],
-        tool_choice={"type": "tool", "name": tool_name},
-        messages=[{"role": "user", "content": user_content}],
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.1,
+        response_format={"type": "json_object"},
     )
     latency_ms = int((time.monotonic() - t0) * 1000)
 
-    # Extract tool_use block
-    output: dict = {}
-    for block in response.content:
-        if block.type == "tool_use" and block.name == tool_name:
-            output = block.input
-            break
+    raw = (response.choices[0].message.content or "{}").strip()
+    output = json.loads(_strip_fences(raw))
 
     usage = response.usage
     meta = {
         "latency_ms": latency_ms,
-        "input_tokens": getattr(usage, "input_tokens", 0),
-        "output_tokens": getattr(usage, "output_tokens", 0),
-        "cache_read_tokens": getattr(usage, "cache_read_input_tokens", 0),
-        "cache_creation_tokens": getattr(usage, "cache_creation_input_tokens", 0),
+        "input_tokens": usage.prompt_tokens if usage else 0,
+        "output_tokens": usage.completion_tokens if usage else 0,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
     }
     return output, meta
 
 
 def _extract_numbers(text: str) -> set[float]:
-    """Pull numeric values (incl. percentages and currency-stripped) from a string."""
     return {float(m) for m in re.findall(r"\d+(?:\.\d+)?", text)}
 
 
 def _validate_citations(findings: list[str], stats: dict) -> bool:
-    """Ensure every number cited in insights findings actually appears in input stats.
-    Citation guard against AI hallucination. Pass if no numbers cited.
-    """
     stat_numbers = _extract_numbers(json.dumps(stats))
     for finding in findings:
         cited = _extract_numbers(finding)
@@ -128,15 +108,14 @@ async def run_pipeline(
 ) -> AsyncGenerator[dict, None]:
     """
     Yields step events: {pipeline_id, step, output, meta, valid}
-    Steps 1-4 run sequentially. Step 5 (insights) is called separately.
+    Steps 1-4 run sequentially.
     """
     pipeline_id = str(uuid.uuid4())
     context: dict[str, Any] = {}
 
     # ── Step 1: Intent ────────────────────────────────────────────────────────
-    output, meta = await _call_claude_tool(
+    output, meta = await _call_gemma_json(
         f"Goal: {goal_text}\n\nClassify the marketer's intent and extract campaign parameters.",
-        "set_campaign_intent",
         "Classify campaign intent, urgency, channels, audience description, KPIs, and a short campaign name.",
         IntentOutput,
     )
@@ -157,8 +136,8 @@ async def run_pipeline(
         "Generate the segment DSL using ONLY the allowed fields: last_order_at, lifetime_spend, order_count. "
         "Use at most 4 filters."
     )
-    output, meta = await _call_claude_tool(
-        prompt, "set_segment_dsl",
+    output, meta = await _call_gemma_json(
+        prompt,
         "Define the segment DSL: list of filters with field/op/value, logic operator, and a one-line audience description.",
         SegmentDSLOutput,
     )
@@ -181,8 +160,8 @@ async def run_pipeline(
         "Design the campaign plan: pick 1-2 channels with an A/B split summing to 100%, "
         "include guardrails (send window, daily cap), and a short rationale."
     )
-    output, meta = await _call_claude_tool(
-        prompt, "set_campaign_plan",
+    output, meta = await _call_gemma_json(
+        prompt,
         "Define the campaign plan: variants with channel and split_pct (sum to 100), send window, daily cap, rationale.",
         CampaignPlanOutput,
     )
@@ -208,8 +187,8 @@ async def run_pipeline(
         "Use ONLY these tokens: {{first_name}}, {{last_order}}, {{discount}}, {{expiry}}, {{brand_name}}. "
         "WhatsApp: max 300 chars, no subject. Email: subject + body."
     )
-    output, meta = await _call_claude_tool(
-        prompt, "set_message_copy",
+    output, meta = await _call_gemma_json(
+        prompt,
         "Write message variants with body, optional subject (email only), and list of tokens used.",
         MessageCopyOutput,
     )
@@ -217,7 +196,7 @@ async def run_pipeline(
     if not valid:
         parsed = MessageCopyOutput(variants=[
             {"variant_id": "A", "channel": "whatsapp", "subject": None,
-             "body": "Hi {{first_name}}! It's been a while — we miss you. Here's a special offer just for you 🎁 Use code {{discount}} before {{expiry}}.",
+             "body": "Hi {{first_name}}! It's been a while — we miss you. Here's a special offer just for you. Use code {{discount}} before {{expiry}}.",
              "tokens_used": ["{{first_name}}", "{{discount}}", "{{expiry}}"]},
             {"variant_id": "B", "channel": "email",
              "subject": "{{first_name}}, a little something to welcome you back",
@@ -239,8 +218,8 @@ async def run_insights(campaign_id: str, stats: dict) -> dict:
     )
 
     for attempt in range(2):
-        output, meta = await _call_claude_tool(
-            prompt, "set_insights",
+        output, meta = await _call_gemma_json(
+            prompt,
             "Produce post-campaign findings (citing real numbers), a next_action, a pre-filled next_goal, confidence, and best_variant.",
             InsightsOutput,
         )
@@ -250,7 +229,6 @@ async def run_insights(campaign_id: str, stats: dict) -> dict:
             if valid_citations or attempt == 1:
                 return {"output": parsed.model_dump(), "valid": valid_citations, "meta": meta}
 
-    # Deterministic fallback
     sent = stats.get("sent", 0)
     fb = InsightsOutput(
         findings=[f"Campaign reached {sent} customers."],

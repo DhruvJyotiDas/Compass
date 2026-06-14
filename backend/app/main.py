@@ -12,6 +12,44 @@ from app.config import settings
 from app.database import engine, get_db
 from app.models import Base
 from app.routers import campaigns, customers, events, pipelines, receipts, segments
+from app.routers import (
+    accounts,
+    activities,
+    auth_router,
+    contacts,
+    dashboard,
+    deal_pipelines,
+    deals,
+    leads,
+    notes,
+    search,
+    users,
+)
+from app.routers import (
+    cases,
+    invoices,
+    price_books,
+    products,
+    purchase_orders,
+    quotes,
+    sales_orders,
+    sla_policies,
+    solutions,
+)
+from app.routers import (
+    assignment_rules,
+    scoring_rules,
+    workflow_rules,
+)
+from app.routers import (
+    custom_fields,
+    email_templates,
+    goals,
+    import_export,
+    marketing_campaigns,
+    reports,
+    web_forms,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("compass")
@@ -29,6 +67,7 @@ app.add_middleware(
 app.state.limiter = receipts.limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# ── Legacy AI-campaign modules (set aside, kept intact) ──────────────────────
 app.include_router(customers.router)
 app.include_router(segments.router)
 app.include_router(campaigns.router)
@@ -37,18 +76,62 @@ app.include_router(events.global_router)
 app.include_router(pipelines.router)
 app.include_router(receipts.router)
 
+# ── CRM core modules ─────────────────────────────────────────────────────────
+app.include_router(auth_router.router)
+app.include_router(users.router)
+app.include_router(leads.router)
+app.include_router(accounts.router)
+app.include_router(contacts.router)
+app.include_router(deal_pipelines.router)
+app.include_router(deals.router)
+app.include_router(activities.router)
+app.include_router(notes.router)
+app.include_router(search.router)
+app.include_router(dashboard.router)
+
+# ── P2 — Sales Documents ──────────────────────────────────────────────────────
+app.include_router(products.router)
+app.include_router(price_books.router)
+app.include_router(quotes.router)
+app.include_router(sales_orders.router)
+app.include_router(invoices.router)
+app.include_router(purchase_orders.router)
+
+# ── P3 — Support ──────────────────────────────────────────────────────────────
+app.include_router(sla_policies.router)
+app.include_router(cases.router)
+app.include_router(solutions.router)
+
+# ── P4 — Workflow Automation ──────────────────────────────────────────────────
+app.include_router(workflow_rules.router)
+app.include_router(assignment_rules.router)
+app.include_router(scoring_rules.router)
+
+# ── P5 — Reports & Goals ──────────────────────────────────────────────────────
+app.include_router(reports.router)
+app.include_router(goals.router)
+
+# ── P6 — Marketing ────────────────────────────────────────────────────────────
+app.include_router(email_templates.router)
+app.include_router(marketing_campaigns.router)
+
+# ── P7 — Custom Fields, Web Forms, Import/Export ──────────────────────────────
+app.include_router(custom_fields.router)
+app.include_router(web_forms.router)
+app.include_router(import_export.router)
+
 
 @app.on_event("startup")
 async def startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    log.info("Compass CRM started — model: %s · cors: %s", settings.claude_model, settings.cors_origins)
+    log.info("Compass CRM started — model: %s · cors: %s", settings.gemma_model, settings.cors_origins)
 
 
 @app.get("/healthz")
 async def healthz(db: AsyncSession = Depends(get_db)):
     await db.execute(text("SELECT 1"))
-    return {"status": "ok", "model": settings.claude_model}
+    return {"status": "ok", "model": settings.gemma_model}
 
 
 @app.get("/api/meta")
@@ -73,7 +156,7 @@ async def meta(db: AsyncSession = Depends(get_db)):
         cache_hit_rate = 0.0
 
     return {
-        "model": settings.claude_model,
+        "model": settings.gemma_model,
         "provider": "Anthropic API",
         "version": "1.0.0",
         "cache_hit_rate_pct": cache_hit_rate,
@@ -91,6 +174,12 @@ def _require_admin(x_admin_secret: str = Header(...)):
 async def admin_seed(db: AsyncSession = Depends(get_db)):
     from app.seed.generate import seed
     return await seed(db)
+
+
+@app.post("/admin/seed-crm", dependencies=[Depends(_require_admin)])
+async def admin_seed_crm(db: AsyncSession = Depends(get_db)):
+    from app.seed.crm import seed_crm
+    return await seed_crm(db)
 
 
 @app.post("/admin/demo-reset", dependencies=[Depends(_require_admin)])
