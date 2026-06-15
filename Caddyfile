@@ -1,4 +1,8 @@
-:80 {
+dhruvjyoti.com, www.dhruvjyoti.com {
+    # Redirect the www host to the apex (canonical) over HTTPS.
+    @www host www.dhruvjyoti.com
+    redir @www https://dhruvjyoti.com{uri} permanent
+
     handle_path /api/* {
         reverse_proxy localhost:8088 {
             flush_interval -1

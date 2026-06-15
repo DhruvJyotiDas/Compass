@@ -10,9 +10,11 @@ Swap providers with ONE env var — no agent code changes.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -60,12 +62,15 @@ def _empty_meta(provider: str, latency_ms: int = 0) -> dict:
     }
 
 
-async def complete_json(system: str, user: str, schema: type[BaseModel]) -> tuple[dict, dict]:
+async def complete_json(
+    system: str, user: str, schema: type[BaseModel], max_tokens: int | None = None
+) -> tuple[dict, dict]:
     """Return (parsed_json, meta). Routes to the real endpoint or the offline mock.
 
     The schema is sent to the model as a contract; on the mock path it selects the generator.
     Callers still validate the dict against the Pydantic schema (agents own their fallbacks),
     so a malformed real-model response degrades gracefully rather than raising here.
+    `max_tokens` caps generation — the dominant latency cost on a token-bound GPU.
     """
     schema_name = schema.__name__
 
@@ -90,6 +95,7 @@ async def complete_json(system: str, user: str, schema: type[BaseModel]) -> tupl
         messages=messages,
         temperature=settings.llm_temperature,
         response_format={"type": "json_object"},
+        max_tokens=max_tokens,
     )
     latency_ms = int((time.monotonic() - t0) * 1000)
 
@@ -102,3 +108,37 @@ async def complete_json(system: str, user: str, schema: type[BaseModel]) -> tupl
         meta["input_tokens"] = usage.prompt_tokens
         meta["output_tokens"] = usage.completion_tokens
     return output, meta
+
+
+async def stream_text(system: str, user: str) -> AsyncGenerator[str, None]:
+    """Yield natural-language text deltas as the model produces them (typewriter streaming).
+
+    Real path streams tokens from the OpenAI-compatible endpoint; the offline mock streams a
+    canned answer word-by-word so the UI behaves identically without a GPU.
+    """
+    if not settings.use_real_llm:
+        canned = (
+            "I'm running in offline mock mode right now, so I can't reason over live data — "
+            "but once the Qwen endpoint is connected I can answer questions about your customers, "
+            "segments and campaigns, and build a campaign whenever you ask."
+        )
+        for word in canned.split(" "):
+            yield word + " "
+            await asyncio.sleep(0.02)
+        return
+
+    stream = await _openai.chat.completions.create(  # type: ignore[union-attr]
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        temperature=settings.llm_temperature,
+        stream=True,
+    )
+    async for chunk in stream:
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta.content
+        if delta:
+            yield delta

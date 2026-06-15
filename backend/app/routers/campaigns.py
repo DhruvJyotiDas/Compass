@@ -1,4 +1,5 @@
 """Campaign endpoints: create, read, edit draft, approve (dispatch), insights."""
+import uuid
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -9,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import get_db
 from app.models import AIRun, Campaign, Communication, OutboxJob
+from app.personalization import build_context, render
 from app.routers.segments import _build_sql
 from app.schemas import ApproveRequest, CampaignOut, DSLFilter
 
@@ -105,11 +107,17 @@ async def approve_campaign(
     logic = dsl_data.get("logic", "AND")
     where, params = _build_sql(filters, logic)
 
-    # Fetch audience
-    audience_sql = text(
-        f"SELECT id, name, email FROM customers WHERE {where}"
-    )
-    rows = (await db.execute(audience_sql, params)).fetchall()
+    # If the marketer picked a specific subset in the preview, send only to those (still
+    # respecting opted_out). Otherwise send to the whole compiled segment.
+    cols = "id, name, email, last_order_at, favorite_category"
+    if body.customer_ids:
+        audience_sql = text(
+            f"SELECT {cols} FROM customers WHERE id = ANY(:ids) AND opted_out = FALSE"
+        )
+        rows = (await db.execute(audience_sql, {"ids": body.customer_ids})).fetchall()
+    else:
+        audience_sql = text(f"SELECT {cols} FROM customers WHERE {where}")
+        rows = (await db.execute(audience_sql, params)).fetchall()
     if not rows:
         raise HTTPException(400, "Segment returned 0 customers — adjust filters")
 
@@ -134,25 +142,35 @@ async def approve_campaign(
         subj = msg_v.get("subject") if msg_v else None
         return channel, msg, subj, v_id
 
-    # Create Communications + OutboxJobs in one transaction
+    # Token values shared by every recipient (discount/percentage from the offer, expiry, brand).
+    offer = (campaign.intent or {}).get("offer")
+    ctx = build_context(offer=offer, goal=campaign.goal_text, brand_name=settings.brand_name)
+
+    # Create Communications + OutboxJobs in bulk (one flush, not one per row — a large
+    # audience would otherwise issue thousands of round-trips and time out the request).
     total = len(rows)
+    comms, jobs = [], []
     for i, row in enumerate(rows):
         channel, msg, subj, v_id = _get_variant(i % max(len(plan_variants), 1))
-
-        comm = Communication(
+        # Fill {{first_name}}, {{discount}}, {{expiry}}… with THIS customer's real data so the
+        # message that actually goes out is personalized — never raw template tokens.
+        cust = {"name": row.name, "last_order_at": row.last_order_at,
+                "favorite_category": row.favorite_category}
+        comm_id = str(uuid.uuid4())
+        comms.append(Communication(
+            id=comm_id,
             campaign_id=campaign_id,
             customer_id=str(row.id),
             channel=channel,
-            message=msg,
-            subject=subj,
+            message=render(msg, cust, ctx),
+            subject=render(subj, cust, ctx),
             variant=v_id,
             status="pending",
-        )
-        db.add(comm)
-        await db.flush()  # get comm.id
-
-        job = OutboxJob(communication_id=comm.id, status="pending")
-        db.add(job)
+        ))
+        jobs.append(OutboxJob(communication_id=comm_id, status="pending"))
+    db.add_all(comms)
+    await db.flush()
+    db.add_all(jobs)
 
     campaign.status = "approved"
     campaign.audience_count = total
@@ -168,17 +186,36 @@ async def _compute_stats(campaign_id: str, db: AsyncSession) -> dict:
     Funnel semantics: a comm that reached 'clicked' should count as
     delivered+opened+clicked, not just clicked.
     """
+    # Funnel level per communication = the furthest stage it reached, taken from
+    # EITHER a delivery event OR the communication's own status. Older demo runs
+    # set communication.status without emitting events, so reading events alone
+    # left every such campaign with an all-zero funnel.
     stats_sql = text("""
+        WITH levels AS (
+            SELECT
+                c.id,
+                GREATEST(
+                    CASE c.status
+                        WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2 WHEN 'opened' THEN 3
+                        WHEN 'read' THEN 4 WHEN 'clicked' THEN 5 ELSE 0 END,
+                    COALESCE(MAX(CASE ce.event_type
+                        WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2 WHEN 'opened' THEN 3
+                        WHEN 'read' THEN 4 WHEN 'clicked' THEN 5 ELSE 0 END), 0)
+                ) AS lvl,
+                bool_or(c.status = 'failed' OR ce.event_type = 'failed') AS failed
+            FROM communications c
+            LEFT JOIN communication_events ce ON ce.communication_id = c.id
+            WHERE c.campaign_id = :cid
+            GROUP BY c.id, c.status
+        )
         SELECT
-            COUNT(DISTINCT ce.communication_id) FILTER (WHERE ce.event_type IN ('sent','delivered','opened','read','clicked')) AS sent,
-            COUNT(DISTINCT ce.communication_id) FILTER (WHERE ce.event_type IN ('delivered','opened','read','clicked')) AS delivered,
-            COUNT(DISTINCT ce.communication_id) FILTER (WHERE ce.event_type IN ('opened','read','clicked')) AS opened,
-            COUNT(DISTINCT ce.communication_id) FILTER (WHERE ce.event_type IN ('read','clicked')) AS read,
-            COUNT(DISTINCT ce.communication_id) FILTER (WHERE ce.event_type = 'clicked') AS clicked,
-            COUNT(DISTINCT ce.communication_id) FILTER (WHERE ce.event_type = 'failed') AS failed
-        FROM communication_events ce
-        JOIN communications c ON c.id = ce.communication_id
-        WHERE c.campaign_id = :cid
+            COUNT(*) FILTER (WHERE lvl >= 1) AS sent,
+            COUNT(*) FILTER (WHERE lvl >= 2) AS delivered,
+            COUNT(*) FILTER (WHERE lvl >= 3) AS opened,
+            COUNT(*) FILTER (WHERE lvl >= 4) AS read,
+            COUNT(*) FILTER (WHERE lvl >= 5) AS clicked,
+            COUNT(*) FILTER (WHERE failed) AS failed
+        FROM levels
     """)
     row = (await db.execute(stats_sql, {"cid": campaign_id})).fetchone()
 
@@ -224,7 +261,7 @@ async def list_communications(
 ):
     """Execution monitor feed: per-customer delivery status, retries and DLQ state."""
     sql = text("""
-        SELECT c.id, cust.name AS customer_name, c.channel, c.variant, c.status,
+        SELECT c.id, c.customer_id, cust.name AS customer_name, c.channel, c.variant, c.status,
                COALESCE(oj.status, 'n/a') AS job_status, COALESCE(oj.attempts, 0) AS attempts
         FROM communications c
         JOIN customers cust ON cust.id = c.customer_id
@@ -235,9 +272,9 @@ async def list_communications(
     """)
     rows = (await db.execute(sql, {"cid": campaign_id, "limit": limit})).fetchall()
     return [
-        {"id": str(r.id), "customer_name": r.customer_name, "channel": r.channel,
-         "variant": r.variant, "status": r.status, "job_status": r.job_status,
-         "attempts": r.attempts}
+        {"id": str(r.id), "customer_id": str(r.customer_id), "customer_name": r.customer_name,
+         "channel": r.channel, "variant": r.variant, "status": r.status,
+         "job_status": r.job_status, "attempts": r.attempts}
         for r in rows
     ]
 

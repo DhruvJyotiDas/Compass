@@ -83,12 +83,12 @@ class Communication(Base):
     __table_args__ = (UniqueConstraint("campaign_id", "customer_id", name="uq_comm_campaign_customer"),)
 
     id = Column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    campaign_id = Column(UUID(as_uuid=False), ForeignKey("campaigns.id"), nullable=False)
+    campaign_id = Column(UUID(as_uuid=False), ForeignKey("campaigns.id"), nullable=True)  # null = direct 1:1 message
     customer_id = Column(UUID(as_uuid=False), ForeignKey("customers.id"), nullable=False)
     channel = Column(String(32), nullable=False)  # whatsapp|email|sms
     message = Column(Text)
     subject = Column(String(512))
-    variant = Column(String(8))  # A|B
+    variant = Column(String(64))  # variant id from the plan, e.g. "A" or "email_vip_offer"
     status = Column(String(32), default="pending")  # pending|sent|delivered|opened|read|clicked|failed
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

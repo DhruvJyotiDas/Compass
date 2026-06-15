@@ -38,6 +38,19 @@ FIELD_REGISTRY = {
         "gte": "order_count >= :val",
         "lte": "order_count <= :val",
     },
+    "engagement_score": {
+        "gte": "engagement_score >= :val",
+        "lte": "engagement_score <= :val",
+    },
+    "favorite_category": {
+        "eq": "favorite_category = :val",
+        "neq": "favorite_category <> :val",
+    },
+    "name": {
+        # bind stays a clean param; the % wildcard lives in a literal (asyncpg type inference).
+        "starts_with": "name ILIKE :val || '%'",
+        "contains": "name ILIKE '%' || :val || '%'",
+    },
 }
 
 # Human-readable descriptions for match trace
@@ -45,6 +58,9 @@ FIELD_LABELS = {
     "last_order_at": "last order",
     "lifetime_spend": "lifetime spend",
     "order_count": "orders placed",
+    "engagement_score": "engagement score",
+    "favorite_category": "favorite category",
+    "name": "name",
 }
 
 OP_LABELS = {
@@ -52,6 +68,10 @@ OP_LABELS = {
     "days_ago_lt": "days ago <",
     "gte": "≥",
     "lte": "≤",
+    "eq": "is",
+    "neq": "is not",
+    "starts_with": "starts with",
+    "contains": "contains",
 }
 
 
@@ -72,13 +92,16 @@ def _build_sql(filters: list[DSLFilter], logic: str = "AND") -> tuple[str, dict]
         template = FIELD_REGISTRY[f.field][f.op]
         clauses.append(template.replace(":val", f":{param_name}"))
 
-        # For interval ops the value is days (int)
-        if f.op in ("days_ago_gt", "days_ago_lt"):
+        # Coerce the bind value to the type the column expects.
+        if f.op in ("days_ago_gt", "days_ago_lt") or f.field in ("order_count", "engagement_score"):
             params[param_name] = int(f.value)
+        elif f.field in ("favorite_category", "name"):
+            params[param_name] = str(f.value)
         else:
             params[param_name] = float(f.value)
 
-    joined = f" {logic} ".join(clauses) if clauses else "TRUE"
+    # No filters must NOT mean "everyone" — that's the dangerous default for a campaign audience.
+    joined = f" {logic} ".join(clauses) if clauses else "FALSE"
     where = f"({joined}) AND opted_out = FALSE"
     return where, params
 
@@ -92,10 +115,32 @@ async def generate_segment(body: GenerateSegmentRequest, db: AsyncSession = Depe
     from app.ai.segment_agent import generate_segment as ai_generate_segment
 
     dsl, meta, valid = await ai_generate_segment(body.goal_text)
-    filters = [DSLFilter(**f) for f in dsl.get("filters", [])]
+    raw_filters = dsl.get("filters", [])
+
+    # Fail safe: if the description couldn't be expressed over a supported attribute the model
+    # returns no filters. Do NOT compile that — empty filters match the ENTIRE customer base,
+    # which would silently target everyone. Tell the user what segments CAN target instead.
+    if not raw_filters:
+        return {
+            "dsl": {"filters": [], "logic": dsl.get("logic", "AND")},
+            "audience_description": dsl.get("audience_description", ""),
+            "provider": meta.get("provider", "unknown"),
+            "valid": False,
+            "unsupported": True,
+            "message": (
+                "Couldn't translate that into a supported audience filter. Segments can target: "
+                "last order recency, lifetime spend (₹), order count, engagement score (0–100), or "
+                "favorite category. Try e.g. \"high-spend customers who lapsed 60+ days\"."
+            ),
+            "count": 0,
+            "sql_preview": "",
+            "sample": [],
+        }
+
+    filters = [DSLFilter(**f) for f in raw_filters]
     _validate_dsl(filters)
     preview = await compile_segment(
-        CompileRequest(dsl={"filters": dsl.get("filters", []), "logic": dsl.get("logic", "AND")}),
+        CompileRequest(dsl={"filters": raw_filters, "logic": dsl.get("logic", "AND")}),
         db,
     )
     return {
@@ -103,6 +148,7 @@ async def generate_segment(body: GenerateSegmentRequest, db: AsyncSession = Depe
         "audience_description": dsl.get("audience_description", ""),
         "provider": meta.get("provider", "unknown"),
         "valid": valid,
+        "unsupported": False,
         "count": preview.count,
         "sql_preview": preview.sql_preview,
         "sample": preview.sample,
@@ -118,9 +164,11 @@ async def compile_segment(body: CompileRequest, db: AsyncSession = Depends(get_d
     count_result = await db.execute(count_sql, params)
     count = count_result.scalar()
 
+    lim = max(1, min(body.limit, 200))
     sample_sql = text(
-        f"SELECT id, name, email, last_order_at, lifetime_spend, order_count "
-        f"FROM customers WHERE {where} ORDER BY lifetime_spend DESC LIMIT 5"
+        f"SELECT id, name, email, last_order_at, lifetime_spend, order_count, "
+        f"engagement_score, favorite_category "
+        f"FROM customers WHERE {where} ORDER BY lifetime_spend DESC LIMIT {lim}"
     )
     sample_result = await db.execute(sample_sql, params)
     rows = sample_result.fetchall()
@@ -178,6 +226,29 @@ def _build_match_trace(filters: list[DSLFilter], row: Any) -> list[CustomerMatch
                 matched = row.order_count >= val
             elif f.op == "lte":
                 matched = row.order_count <= val
+
+        elif f.field == "engagement_score":
+            actual = str(row.engagement_score)
+            val = int(f.value)
+            if f.op == "gte":
+                matched = row.engagement_score >= val
+            elif f.op == "lte":
+                matched = row.engagement_score <= val
+
+        elif f.field == "favorite_category":
+            actual = row.favorite_category or "—"
+            if f.op == "eq":
+                matched = row.favorite_category == f.value
+            elif f.op == "neq":
+                matched = row.favorite_category != f.value
+
+        elif f.field == "name":
+            actual = row.name
+            val = str(f.value).lower()
+            if f.op == "starts_with":
+                matched = row.name.lower().startswith(val)
+            elif f.op == "contains":
+                matched = val in row.name.lower()
 
         trace.append(CustomerMatchTrace(
             field=f.field,

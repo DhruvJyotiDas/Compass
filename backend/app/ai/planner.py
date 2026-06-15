@@ -17,6 +17,7 @@ async def classify_intent(goal_text: str) -> tuple[dict, dict, bool]:
         f"Goal: {goal_text}\n\nClassify the marketer's intent and extract campaign parameters "
         "(intent, urgency, channels, audience_description, kpis, a short campaign_name).",
         IntentOutput,
+        max_tokens=220,
     )
     parsed, valid = safe_validate(IntentOutput, output)
     return (parsed or _FALLBACK).model_dump(), meta, valid

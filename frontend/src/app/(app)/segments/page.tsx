@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Target, Sparkles, Plus, X, Loader2, Play, Check } from "lucide-react";
+import { Target, Sparkles, Plus, X, Loader2, Play, Check, AlertTriangle } from "lucide-react";
 import { api } from "@/lib/api";
 import type { CompileResponse, SegmentFilter } from "@/lib/types";
 import { Button } from "@/components/ui/button";
@@ -9,7 +9,13 @@ import { Badge } from "@/components/ui/badge";
 import { ProviderPill, formatINR } from "@/components/ai/widgets";
 
 // Allow-listed fields mirror the backend FIELD_REGISTRY — the only safe segment surface.
-const FIELDS: Record<string, { label: string; ops: { value: string; label: string }[]; unit: string }> = {
+const CATEGORIES = [
+  "Activewear", "Apparel", "Accessories", "Bags", "Sneakers", "Beauty", "Footwear", "Home & Living",
+];
+const FIELDS: Record<
+  string,
+  { label: string; ops: { value: string; label: string }[]; unit: string; choices?: string[] }
+> = {
   last_order_at: {
     label: "Last order",
     ops: [
@@ -34,6 +40,23 @@ const FIELDS: Record<string, { label: string; ops: { value: string; label: strin
     ],
     unit: "orders",
   },
+  engagement_score: {
+    label: "Engagement score",
+    ops: [
+      { value: "gte", label: "≥" },
+      { value: "lte", label: "≤" },
+    ],
+    unit: "0–100",
+  },
+  favorite_category: {
+    label: "Favorite category",
+    ops: [
+      { value: "eq", label: "is" },
+      { value: "neq", label: "is not" },
+    ],
+    unit: "",
+    choices: CATEGORIES,
+  },
 };
 
 const DEFAULT_FILTERS: SegmentFilter[] = [{ field: "last_order_at", op: "days_ago_gt", value: 60 }];
@@ -48,6 +71,7 @@ export default function SegmentsPage() {
   const [aiLoading, setAiLoading] = useState(false);
   const [provider, setProvider] = useState<string>();
   const [description, setDescription] = useState<string>();
+  const [aiMessage, setAiMessage] = useState<string>();
 
   function update(i: number, patch: Partial<SegmentFilter>) {
     setFilters((f) => f.map((row, idx) => (idx === i ? { ...row, ...patch } : row)));
@@ -62,7 +86,13 @@ export default function SegmentsPage() {
   async function compile() {
     setLoading(true);
     try {
-      setResult(await api.compileSegment(filters.map((f) => ({ ...f, value: Number(f.value) })), logic));
+      // Only numeric fields get coerced — category values stay strings.
+      setResult(
+        await api.compileSegment(
+          filters.map((f) => ({ ...f, value: FIELDS[f.field]?.choices ? f.value : Number(f.value) })),
+          logic,
+        ),
+      );
     } catch (e) {
       console.error(e);
     } finally {
@@ -75,9 +105,18 @@ export default function SegmentsPage() {
     setAiLoading(true);
     try {
       const r = await api.generateSegment(goal.trim());
+      setProvider(r.provider);
+      // The description couldn't be expressed over a supported attribute — don't show a
+      // misleading audience (and keep the existing manual filters intact).
+      if (r.unsupported) {
+        setAiMessage(r.message || "Couldn't translate that into a supported filter.");
+        setDescription(undefined);
+        setResult(null);
+        return;
+      }
+      setAiMessage(undefined);
       setFilters(r.dsl.filters);
       setLogic((r.dsl.logic as "AND" | "OR") || "AND");
-      setProvider(r.provider);
       setDescription(r.audience_description);
       setResult({ count: r.count, sql_preview: r.sql_preview, sample: r.sample });
     } catch (e) {
@@ -121,6 +160,11 @@ export default function SegmentsPage() {
               <Check className="h-4 w-4 text-emerald-500" /> {description} {provider && <ProviderPill provider={provider} />}
             </p>
           )}
+          {aiMessage && (
+            <p className="mt-2 flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-sm text-amber-700 dark:text-amber-400">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" /> {aiMessage}
+            </p>
+          )}
         </div>
       )}
 
@@ -144,7 +188,13 @@ export default function SegmentsPage() {
                 value={f.field}
                 onChange={(e) => {
                   const field = e.target.value;
-                  update(i, { field, op: FIELDS[field].ops[0].value });
+                  const choices = FIELDS[field].choices;
+                  update(i, {
+                    field,
+                    op: FIELDS[field].ops[0].value,
+                    // Reset value to a valid one for the new field type.
+                    value: choices ? choices[0] : typeof f.value === "number" ? f.value : 0,
+                  });
                 }}
                 className="h-9 rounded-md border bg-background px-2 text-sm"
               >
@@ -161,12 +211,24 @@ export default function SegmentsPage() {
                   <option key={o.value} value={o.value}>{o.label}</option>
                 ))}
               </select>
-              <input
-                type="number"
-                value={f.value}
-                onChange={(e) => update(i, { value: e.target.value })}
-                className="h-9 w-32 rounded-md border bg-background px-2 text-sm"
-              />
+              {FIELDS[f.field].choices ? (
+                <select
+                  value={String(f.value)}
+                  onChange={(e) => update(i, { value: e.target.value })}
+                  className="h-9 w-40 rounded-md border bg-background px-2 text-sm"
+                >
+                  {FIELDS[f.field].choices!.map((c) => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="number"
+                  value={f.value}
+                  onChange={(e) => update(i, { value: e.target.value })}
+                  className="h-9 w-32 rounded-md border bg-background px-2 text-sm"
+                />
+              )}
               <span className="w-14 text-xs text-muted-foreground">{FIELDS[f.field].unit}</span>
               <button onClick={() => removeFilter(i)} className="text-muted-foreground hover:text-destructive">
                 <X className="h-4 w-4" />

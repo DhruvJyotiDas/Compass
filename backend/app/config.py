@@ -13,16 +13,19 @@ class Settings(BaseSettings):
     # the entire AI flow (planner → segment → campaign → copy → insights) works before
     # the real endpoint is wired in. Every response is tagged with its provider so no
     # surface ever silently fabricates "AI" output.
-    llm_base_url: str = "http://163.128.34.19:8000/v1"   # self-hosted vLLM (Qwen2.5-14B)
+    llm_base_url: str = "http://163.128.34.19/v1"   # self-hosted vLLM (Qwen2.5-14B), port 80
     llm_model: str = "/root/test/models/Qwen2.5-14B-Instruct-AWQ"
     llm_api_key: str = "sk-no-auth"              # vLLM ignores this by default
     llm_enabled: bool = True                     # master kill-switch → force mock when False
     llm_temperature: float = 0.2
-    llm_timeout_seconds: int = 90
+    llm_timeout_seconds: int = 120  # per-call; copy/plan steps can run 30–45s each
 
     # Back-compat aliases (legacy Ollama config — still read from env if present)
     ollama_url: str = "http://ollama:11434"
     gemma_model: str = "gemma4:e2b"
+
+    # Brand identity used to fill {{brand_name}} tokens and sign personalized messages.
+    brand_name: str = "Compass"
 
     channel_service_url: str = "http://channel:8001"
     channel_hmac_secret: str = "dev-secret-change-in-prod"
