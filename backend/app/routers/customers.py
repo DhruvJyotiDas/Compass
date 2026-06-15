@@ -1,14 +1,20 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select, text, update
+from sqlalchemy import or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import uuid
+
+from pydantic import BaseModel
+
 from app.ai.customer_agent import customer_card
+from app.config import settings
 from app.customer_metrics import engagement_update_sql
 from app.database import get_db
-from app.models import Customer, Order
+from app.personalization import build_context, render
+from app.models import Communication, Customer, Order, OutboxJob
 from app.schemas import (
     CustomerCardResponse,
     CustomerDetailOut,
@@ -102,9 +108,17 @@ async def ingest(body: IngestRequest, db: AsyncSession = Depends(get_db)):
 async def list_customers(
     limit: int = Query(50, le=500),
     offset: int = Query(0),
+    q: str | None = Query(None, description="Search by name or email (case-insensitive), across all customers"),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(Customer).order_by(Customer.created_at.desc()).limit(limit).offset(offset))
+    stmt = select(Customer)
+    if q and q.strip():
+        like = f"%{q.strip()}%"
+        stmt = stmt.where(or_(Customer.name.ilike(like), Customer.email.ilike(like)))
+    # Default order surfaces the most valuable/engaged shoppers first (the page is
+    # "scored by engagement"), instead of newest-created rows that are mostly zero-spend.
+    stmt = stmt.order_by(Customer.engagement_score.desc(), Customer.lifetime_spend.desc())
+    result = await db.execute(stmt.limit(limit).offset(offset))
     return result.scalars().all()
 
 
@@ -152,3 +166,57 @@ async def get_customer_ai_card(customer_id: str, db: AsyncSession = Depends(get_
         summary=card["summary"], churn_risk=card["churn_risk"],
         suggestions=card["suggestions"], provider=meta.get("provider", "unknown"), valid=valid,
     )
+
+
+@router.get("/{customer_id}/communications")
+async def customer_communications(customer_id: str, db: AsyncSession = Depends(get_db)):
+    """Every message (campaign + direct) ever sent to this customer, newest first."""
+    await _get_customer(customer_id, db)  # 404 if missing
+    rows = (await db.execute(text(
+        "SELECT c.id, c.channel, c.subject, c.message, c.status, c.variant, c.created_at, "
+        "c.campaign_id, ca.name AS campaign_name "
+        "FROM communications c LEFT JOIN campaigns ca ON ca.id = c.campaign_id "
+        "WHERE c.customer_id = :cid ORDER BY c.created_at DESC"
+    ), {"cid": customer_id})).fetchall()
+    return [
+        {"id": str(r.id), "channel": r.channel, "subject": r.subject, "message": r.message,
+         "status": r.status, "variant": r.variant, "created_at": r.created_at,
+         "campaign_id": str(r.campaign_id) if r.campaign_id else None,
+         "campaign_name": r.campaign_name or ("Direct message" if not r.campaign_id else None)}
+        for r in rows
+    ]
+
+
+class DirectMessageRequest(BaseModel):
+    channel: str               # email | sms | whatsapp
+    subject: str | None = None
+    body: str
+
+
+@router.post("/{customer_id}/message")
+async def send_direct_message(
+    customer_id: str, body: DirectMessageRequest, db: AsyncSession = Depends(get_db),
+):
+    """Send a one-off message to a single customer (no campaign). Goes through the outbox→channel."""
+    cust = await _get_customer(customer_id, db)
+    if cust.opted_out:
+        raise HTTPException(400, "Customer has opted out of communications")
+    if not body.body.strip():
+        raise HTTPException(400, "Message body is required")
+
+    # Fill any {{tokens}} with this customer's real data before queueing (the body is usually
+    # already personalized, but this guarantees nothing raw like "{{first_name}}" goes out).
+    cust = {"name": cust.name, "last_order_at": cust.last_order_at,
+            "favorite_category": cust.favorite_category}
+    ctx = build_context(goal=body.body, brand_name=settings.brand_name)
+    comm_id = str(uuid.uuid4())
+    db.add(Communication(
+        id=comm_id, campaign_id=None, customer_id=customer_id,
+        channel=body.channel, message=render(body.body, cust, ctx),
+        subject=render(body.subject, cust, ctx) if body.channel == "email" else None,
+        variant="direct", status="pending",
+    ))
+    await db.flush()
+    db.add(OutboxJob(communication_id=comm_id, status="pending"))
+    await db.commit()
+    return {"status": "queued", "communication_id": comm_id, "channel": body.channel}

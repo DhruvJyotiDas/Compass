@@ -188,6 +188,41 @@ def _customer_card(text: str) -> dict:
     return {"summary": summary, "churn_risk": risk, "suggestions": suggestions[:2]}
 
 
+def _route(text: str) -> dict:
+    """Best-effort offline router for the conversational assistant."""
+    t = (text or "").lower()
+    last = t.rsplit("user:", 1)[-1]  # focus on the latest user turn
+    if any(k in last for k in ("add customer", "add this customer", "save customer", "create customer")):
+        return {"action": "add_customer"}
+    if any(k in last for k in ("profile", "tell me about", "what mail", "what message", "what should i send")):
+        return {"action": "profile"}
+    if any(k in last for k in ("last ", "mails i sent", "messages i sent", "sms i sent", "mails sent",
+                               "history", "previous mail", "sent to")):
+        return {"action": "history", "channel": "any"}
+    if any(k in last for k in ("build", "launch", "create a campaign", "campaign for", "send a campaign")):
+        return {"action": "campaign"}
+    if any(k in last for k in ("show me customers", "list customers", "find customers", "who are")):
+        return {"action": "list"}
+    return {"action": "answer"}
+
+
+def _personalized(text: str) -> dict:
+    name_m = re.search(r"name=(.+)", text)
+    name = (name_m.group(1).strip().split()[0] if name_m else "there")
+    cat_m = re.search(r"favorite_category=(.+)", text)
+    cat = (cat_m.group(1).strip() if cat_m else "collection")
+    brand_m = re.search(r"brand_name=(.+)", text)
+    brand = (brand_m.group(1).strip() if brand_m else "Compass")
+    return {
+        "channel": "email",
+        "subject": f"{name}, picked just for you",
+        "body": (f"Hi {name},\n\nWe thought you'd love our latest {cat} arrivals. Here's a little "
+                 f"something to welcome you back — enjoy a special offer on your next order at {brand}."
+                 f"\n\nWarmly,\n{brand}"),
+        "rationale": f"Re-engagement note referencing the customer's interest in {cat}.",
+    }
+
+
 # ── Dispatch by schema name ─────────────────────────────────────────────────────
 
 _GENERATORS = {
@@ -197,6 +232,8 @@ _GENERATORS = {
     "MessageCopyOutput": _copy,
     "InsightsOutput": _insights,
     "CustomerCardOutput": _customer_card,
+    "AssistantRoute": _route,
+    "PersonalizedMessageOutput": _personalized,
 }
 
 

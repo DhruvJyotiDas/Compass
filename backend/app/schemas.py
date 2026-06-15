@@ -92,6 +92,7 @@ class SegmentDSL(BaseModel):
 
 class CompileRequest(BaseModel):
     dsl: SegmentDSL
+    limit: int = 5  # number of preview/sample customers to return
 
 
 class CustomerMatchTrace(BaseModel):
@@ -138,6 +139,7 @@ class CampaignOut(BaseModel):
 
 class ApproveRequest(BaseModel):
     segment_dsl: Optional[SegmentDSL] = None  # override if user edited chips
+    customer_ids: Optional[list[str]] = None  # send to this explicit subset instead of the whole segment
 
 
 # ── Pipelines ─────────────────────────────────────────────────────────────────

@@ -16,7 +16,7 @@ goal and watch AI build the audience, the campaign, and the messages for you.
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)
 ![Tailwind](https://img.shields.io/badge/Tailwind-3-38BDF8?logo=tailwindcss&logoColor=white)
-![LLM](https://img.shields.io/badge/LLM-Qwen3--8B%20(self--hosted)-7C3AED)
+![LLM](https://img.shields.io/badge/LLM-Qwen2.5--14B--AWQ%20(self--hosted)-7C3AED)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
 </div>
@@ -78,10 +78,19 @@ not a separate silo.
 
 ### 🪄 AI Engagement (the primary workspace)
 
-- **Growth Assistant** — a single input: _"What business outcome do you want?"_ Submit a goal like
-  _"Win back premium customers who haven't ordered in 90 days"_ and watch a live reasoning timeline:
-  **Understand → Analyze → Find audience → Design campaign → Generate messages**, ending in a fully
-  **editable campaign artifact**.
+- **Growth Assistant** — a **conversational, ask-anything copilot** that streams its answer
+  **token-by-token** (SSE). It classifies each message and routes to the right action:
+  - **Build a campaign** — submit a goal like _"Win back premium customers who haven't ordered in
+    90 days"_ and watch a live reasoning timeline (**Understand → Analyze → Find audience → Design
+    campaign → Generate messages**) end in a fully **editable campaign artifact**. A campaign is only
+    ever created on an explicit ask.
+  - **Find / list customers** — _"show high-value sneaker buyers"_ returns the real matching rows.
+  - **Customer profile + suggested message** — _"tell me about Anita and what email I should send
+    her"_ returns her profile plus a ready-to-send, fully-rendered draft.
+  - **Message history** — _"show the last 2 emails I sent to Rahul"_ pulls the actual past sends.
+  - **Add a customer** — _"add customer Rahul Sharma, rahul@email.com, 9876543210"_ writes the row.
+  - **Answer anything** — questions, analysis, and advice, grounded in a **live snapshot of your own
+    CRM data** (customers, segments, campaigns) so it can reason about your numbers, not generic ones.
 - **Customer Intelligence** — every shopper is scored with an **engagement score (0–100, RFM blend)**
   and a **favorite category**. Open a customer to get an **AI Customer Card**: a natural-language
   summary, **churn-risk** rating, lifetime value, and **next-best-action** suggestions.
@@ -90,9 +99,11 @@ not a separate silo.
   LLM SQL) and shows the live audience count plus a **per-customer "why matched"** trace.
 - **AI Campaign Builder** — review and edit the AI artifact: **Improve Message**, regenerate variants,
   refine the audience, then **Approve & Launch**. Manual campaign creation is fully supported too.
-- **Personalization Engine** — copy is generated with a fixed token allow-list
-  (`{{first_name}}`, `{{last_order}}`, `{{discount}}`, `{{expiry}}`, `{{brand_name}}`), substituted
-  server-side — so private customer data is never exposed to the model.
+- **Personalization Engine** (`app/personalization.py`) — copy is generated with a fixed token
+  allow-list (`{{first_name}}`, `{{last_order}}`, `{{discount}}`, `{{expiry}}`, `{{brand_name}}`),
+  substituted with each recipient's real data **server-side at send time** — so private customer data
+  is never exposed to the model, and any unfillable token falls back to a safe default (never a
+  literal `{{…}}` reaches a customer).
 - **Communications monitor** — a live execution feed: per-customer **delivery status, retries, and
   dead-letter** state.
 - **Analytics & Insights** — a visual **conversion funnel** (Sent → Delivered → Opened → Clicked →
@@ -175,12 +186,13 @@ in the **AI Decision History**.
                           ┌─────────────────────────▼───┐   ┌───▼──────────────┐
                           │  AI layer (/app/ai)          │   │  PostgreSQL 16   │
                           │  client · planner · segment  │   │  async SQLAlchemy│
-                          │  campaign · insight · customer│  └───┬──────────────┘
+                          │  campaign · insight ·        │   └───┬──────────────┘
+                          │  customer · assistant        │       │
                           └──────────────┬───────────────┘      │
                                          │                       │
                   ┌──────────────────────▼──────┐   ┌────────────▼─────────────┐
                   │  LLM endpoint               │   │  Outbox worker           │
-                  │  Self-hosted Qwen3-8B (vLLM)│   │  (SKIP LOCKED · retries) │
+                  │ Self-hosted Qwen2.5-14B(vLLM)│   │  (SKIP LOCKED · retries) │
                   │  …or deterministic MOCK     │   └────────────┬─────────────┘
                   └─────────────────────────────┘                │
                                                      ┌────────────▼─────────────┐
@@ -203,16 +215,18 @@ app/ai/
 │                       #   complete_json(system, user, schema) → (output, meta)
 ├── mock.py            # deterministic, keyword-aware offline mock (runs with no GPU)
 ├── prompts.py         # shared system prompt + safety rules
+├── schemas.py         # Pydantic output schemas every agent validates against
 ├── planner.py         # ① intent
 ├── segment_agent.py   # ② goal → safe segment DSL
 ├── campaign_agent.py  # ③ plan + personalized copy
 ├── insight_agent.py   # ④ citation-validated post-campaign insights
 ├── customer_agent.py  # AI Customer Card
+├── assistant_agent.py # conversational Growth Assistant brain (intent routing + replies)
 └── pipeline.py        # thin orchestrator over the agents
 ```
 
-- **Provider-agnostic** — any **OpenAI-compatible** endpoint works: a self-hosted, 4-bit quantized
-  **Qwen3-8B-Instruct** behind vLLM (the production target), Ollama, TGI, or OpenAI.
+- **Provider-agnostic** — any **OpenAI-compatible** endpoint works: a self-hosted, 4-bit AWQ-quantized
+  **Qwen2.5-14B-Instruct** behind vLLM (the production target), Ollama, TGI, or OpenAI.
 - **Runs before the GPU exists** — with no endpoint configured, a **deterministic mock** produces
   schema-valid, keyword-aware output so the entire flow is demoable offline. Every response is tagged
   with its provider, so **nothing is ever passed off as real model output**.
@@ -228,7 +242,7 @@ app/ai/
 | **Frontend** | Next.js 14 (App Router), TypeScript, Tailwind CSS, shadcn/ui, Recharts, Inter, lucide-react |
 | **Backend** | FastAPI, Python 3.12, async SQLAlchemy, Pydantic v2, JWT auth (python-jose + passlib/bcrypt) |
 | **Database** | PostgreSQL 16 |
-| **AI** | OpenAI-compatible client → self-hosted **Qwen3-8B-Instruct (4-bit)** / deterministic mock |
+| **AI** | OpenAI-compatible client → self-hosted **Qwen2.5-14B-Instruct (4-bit AWQ, vLLM)** / deterministic mock |
 | **Execution** | Transactional outbox worker + standalone channel-service simulator (HMAC receipts) |
 | **Infra** | Caddy 2 (TLS reverse proxy), Docker Compose |
 
@@ -282,6 +296,34 @@ npm install && npm run build && npm start    # http://localhost:3000
 > The first time you open the app, a **Quick Demo tour** walks you through every tab and can run a
 > full campaign for you. You can replay it anytime from the **"Quick demo"** button in the top bar.
 
+### Running in production (systemd + Caddy)
+
+The live deployment runs each process as a `systemd` unit (auto-restart on crash, start on boot),
+behind Caddy for TLS:
+
+| Unit | Process | Port |
+|------|---------|------|
+| `compass-backend` | FastAPI / uvicorn | 8088 |
+| `compass-frontend` | Next.js (`next start`) | 3000 |
+| `compass-channel` | delivery simulator | 8001 |
+| `compass-outbox` | outbox dispatcher | — |
+
+Caddy proxies `/api/*` → `:8088` and everything else → `:3000`. All units read secrets from the
+repo-root `.env` (`EnvironmentFile`) and log to `/var/log/compass/`. Manage them the usual way:
+
+> **Frontend → API URL must stay relative.** `NEXT_PUBLIC_API_URL` is baked into the client bundle
+> at `next build` time and is set to **`/api`** (in tracked `frontend/.env.production`) so the browser
+> always calls the API on the same origin/scheme the page was served from. Never set it to an absolute
+> `http://<ip>/api` — an HTTPS page fetching an HTTP/IP URL is blocked by the browser as a
+> mixed-content "network error". After changing it, rebuild: `cd frontend && npm run build && sudo
+> systemctl restart compass-frontend`.
+
+```bash
+sudo systemctl status  compass-backend
+sudo systemctl restart compass-frontend
+journalctl -u compass-backend -f
+```
+
 ---
 
 ## 🔌 Pointing Compass at your own LLM
@@ -290,8 +332,8 @@ Switching from the offline mock to a real model is a single environment variable
 
 ```bash
 # backend env (.env)
-LLM_BASE_URL=http://your-gpu-vm:8000/v1     # any OpenAI-compatible endpoint
-LLM_MODEL=Qwen3-8B-Instruct
+LLM_BASE_URL=http://your-gpu-vm/v1          # any OpenAI-compatible endpoint (vLLM on port 80 here)
+LLM_MODEL=Qwen2.5-14B-Instruct-AWQ          # or the path your server exposes
 LLM_API_KEY=sk-no-auth                       # most self-hosted servers ignore this
 # LLM_ENABLED=false                          # force the mock even if a URL is set
 ```
@@ -307,11 +349,12 @@ active provider and model.
 compass/
 ├── backend/
 │   └── app/
-│       ├── ai/                 # swappable LLM client + named agents + mock
-│       ├── routers/            # AI engagement (customers, segments, campaigns, pipelines,
-│       │                       #   events, receipts) + full CRM (leads, deals, quotes, …)
+│       ├── ai/                 # swappable LLM client + named agents (incl. assistant) + mock
+│       ├── routers/            # AI engagement (assistant, customers, segments, campaigns,
+│       │                       #   pipelines, events, receipts) + full CRM (leads, deals, quotes, …)
 │       ├── workers/outbox.py   # transactional outbox dispatcher
 │       ├── customer_metrics.py # engagement score (RFM) — one definition, reused
+│       ├── personalization.py  # {{token}} → real per-recipient data, server-side at send time
 │       ├── models.py           # SQLAlchemy models (AI engagement + CRM core)
 │       └── seed/               # demo data generators
 ├── channel-service/            # standalone delivery simulator (lifecycle + HMAC receipts)
@@ -332,6 +375,7 @@ compass/
 
 | Area | Endpoints |
 |------|-----------|
+| **Growth Assistant** | `GET /assistant/stream` (SSE: token-by-token replies, customer lists, history, profiles, campaign builds) |
 | **AI pipeline** | `POST /pipelines` · `GET /pipelines/{id}/runs` |
 | **Customers** | `GET /customers` · `GET /customers/{id}` · `GET /customers/{id}/ai-card` |
 | **Segments** | `POST /segments/compile` · `POST /segments/generate` |
@@ -370,7 +414,8 @@ Interactive docs at `http://localhost:8000/docs`.
 - [x] AI segment builder, campaign builder, insights loop
 - [x] Transactional execution engine + delivery simulator
 - [x] AI-native UI + onboarding tour, with the full CRM preserved
-- [ ] Streaming token-by-token reasoning in the Growth Assistant
+- [x] Conversational, ask-anything Growth Assistant grounded in live CRM data
+- [x] Streaming token-by-token replies in the Growth Assistant (SSE)
 - [ ] Authenticated, org-scoped AI engagement endpoints
 - [ ] Real channel providers (WhatsApp Business / SMS / SES) behind the same interface
 - [ ] Autonomous agent mode (AI proposes campaigns proactively from data drift)

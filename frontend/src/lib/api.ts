@@ -353,19 +353,29 @@ export const api = {
   // ════════════════════════════════════════════════════════════════════════
 
   // ── Customers / Shoppers ──
-  listCustomers: (p: { limit?: number; offset?: number } = {}) =>
+  listCustomers: (p: { limit?: number; offset?: number; q?: string } = {}) =>
     request<Customer[]>(`/customers${qs(p)}`),
   getCustomer: (id: string) => request<CustomerDetail>(`/customers/${id}`),
   customerAiCard: (id: string) => request<CustomerCard>(`/customers/${id}/ai-card`),
+  customerCommunications: (id: string) =>
+    request<
+      { id: string; channel: string; subject: string | null; message: string; status: string;
+        variant: string; created_at: string; campaign_id: string | null; campaign_name: string | null }[]
+    >(`/customers/${id}/communications`),
+  sendDirectMessage: (id: string, body: { channel: string; subject?: string; body: string }) =>
+    request<{ status: string; communication_id: string; channel: string }>(
+      `/customers/${id}/message`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
 
   // ── Segments ──
-  compileSegment: (filters: SegmentFilter[], logic = "AND") =>
+  compileSegment: (filters: SegmentFilter[], logic = "AND", limit = 5) =>
     request<CompileResponse>("/segments/compile", {
       method: "POST",
-      body: JSON.stringify({ dsl: { filters, logic } }),
+      body: JSON.stringify({ dsl: { filters, logic }, limit }),
     }),
   generateSegment: (goal_text: string) =>
-    request<CompileResponse & { dsl: { filters: SegmentFilter[]; logic: string }; audience_description: string; provider: string; valid: boolean }>(
+    request<CompileResponse & { dsl: { filters: SegmentFilter[]; logic: string }; audience_description: string; provider: string; valid: boolean; unsupported?: boolean; message?: string }>(
       "/segments/generate",
       { method: "POST", body: JSON.stringify({ goal_text }) },
     ),
@@ -373,6 +383,14 @@ export const api = {
   // ── Growth Assistant pipeline ──
   runPipeline: (goal_text: string) =>
     request<PipelineResult>("/pipelines", { method: "POST", body: JSON.stringify({ goal_text }) }),
+  // Live SSE URL — the Growth Assistant subscribes to this for real per-step progress.
+  pipelineStreamUrl: (goal_text: string) =>
+    `${API}/pipelines/run-stream?goal_text=${encodeURIComponent(goal_text)}`,
+  // Conversational assistant SSE — streams a token-by-token answer, or campaign steps when asked.
+  // `history` is a JSON string of recent {role, content} turns for multi-turn context.
+  assistantStreamUrl: (message: string, history?: string) =>
+    `${API}/assistant/stream?message=${encodeURIComponent(message)}` +
+    (history ? `&history=${encodeURIComponent(history)}` : ""),
   pipelineRuns: (pipelineId: string) => request<AiRun[]>(`/pipelines/${pipelineId}/runs`),
 
   // ── AI Campaigns ──
@@ -385,17 +403,20 @@ export const api = {
       `/campaigns/${id}/improve-copy`,
       { method: "POST", body: JSON.stringify({ instruction }) },
     ),
-  approveAiCampaign: (id: string, segment_dsl?: { filters: SegmentFilter[]; logic?: string }) =>
+  approveAiCampaign: (
+    id: string,
+    opts?: { segment_dsl?: { filters: SegmentFilter[]; logic?: string }; customer_ids?: string[] },
+  ) =>
     request<{ status: string; audience_count: number; campaign_id: string }>(
       `/campaigns/${id}/approve`,
-      { method: "POST", body: JSON.stringify(segment_dsl ? { segment_dsl } : {}) },
+      { method: "POST", body: JSON.stringify(opts ?? {}) },
     ),
   campaignStats: (id: string) => request<CampaignStats>(`/campaigns/${id}/stats`),
   campaignInsights: (id: string) =>
     request<AiInsights>(`/campaigns/${id}/insights`, { method: "POST" }),
   campaignCommunications: (id: string) =>
     request<
-      { id: string; customer_name: string; channel: string; variant: string; status: string; job_status: string; attempts: number }[]
+      { id: string; customer_id: string; customer_name: string; channel: string; variant: string; status: string; job_status: string; attempts: number }[]
     >(`/campaigns/${id}/communications`),
 
   // ── Meta (provider, model, AI call stats) ──

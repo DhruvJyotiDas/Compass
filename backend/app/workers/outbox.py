@@ -80,7 +80,8 @@ async def _process_batch(db: AsyncSession, http: httpx.AsyncClient) -> int:
             "message": c.message or "",
             "subject": c.subject,
             "variant": c.variant,
-            "campaign_id": str(c.campaign_id),
+            # direct 1:1 messages have no campaign — send a zero-uuid sentinel (channel requires a str).
+            "campaign_id": str(c.campaign_id) if c.campaign_id else "00000000-0000-0000-0000-000000000000",
         })
 
     try:

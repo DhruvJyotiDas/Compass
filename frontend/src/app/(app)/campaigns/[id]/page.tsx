@@ -8,7 +8,7 @@ import {
   TrendingUp, Lightbulb, ArrowRight, Users,
 } from "lucide-react";
 import { api } from "@/lib/api";
-import type { AiCampaign, AiInsights, CampaignStats, MessageVariant } from "@/lib/types";
+import type { AiCampaign, AiInsights, CampaignStats, CompileResponse, MessageVariant } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ConversionFunnel, ProviderPill } from "@/components/ai/widgets";
@@ -26,6 +26,8 @@ export default function CampaignDetailPage() {
   const [stats, setStats] = useState<CampaignStats | null>(null);
   const [insights, setInsights] = useState<AiInsights | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [preview, setPreview] = useState<CompileResponse | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const isDraft = c?.status === "draft";
@@ -41,6 +43,17 @@ export default function CampaignDetailPage() {
   }, [id]);
 
   useEffect(() => { load(); }, [load]);
+
+  // For a draft, preview the actual customers the segment selects (up to 50) so the marketer
+  // can see exactly who'll be contacted and pick a subset before launching.
+  useEffect(() => {
+    if (!c || c.status !== "draft") return;
+    const filters = c.segment_dsl?.filters;
+    if (!filters || filters.length === 0) { setPreview(null); return; }
+    api.compileSegment(filters, c.segment_dsl?.logic || "AND", 50)
+      .then((p) => { setPreview(p); setSelected(new Set(p.sample.map((s) => s.id))); })
+      .catch(() => setPreview(null));
+  }, [c]);
 
   // Live funnel polling while the campaign is dispatching.
   useEffect(() => {
@@ -70,16 +83,30 @@ export default function CampaignDetailPage() {
     } finally { setBusy(null); }
   }
 
+  // True when the marketer unchecked some previewed customers → send to the explicit subset.
+  const previewIds = preview?.sample.map((s) => s.id) ?? [];
+  const usingSubset = previewIds.length > 0 && selected.size < previewIds.length;
+
   async function approve() {
     if (!c) return;
+    if (preview && selected.size === 0) { alert("Select at least one recipient"); return; }
     setBusy("approve");
     try {
       await api.updateAiCampaign(c.id, { name, message_variants: messages }).catch(() => {});
-      await api.approveAiCampaign(c.id);
+      await api.approveAiCampaign(c.id, usingSubset ? { customer_ids: Array.from(selected) } : undefined);
       await load();
     } catch (e) {
       alert(e instanceof Error ? e.message : "Approve failed");
     } finally { setBusy(null); }
+  }
+
+  function toggle(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   }
 
   async function genInsights() {
@@ -137,9 +164,41 @@ export default function CampaignDetailPage() {
           ))}
         </div>
         <div className="mt-3 flex items-center gap-3 text-sm text-muted-foreground">
-          {c.audience_count != null && <span className="flex items-center gap-1"><Users className="h-4 w-4" /> {c.audience_count.toLocaleString()} recipients</span>}
+          {isDraft && preview ? (
+            <span className="flex items-center gap-1">
+              <Users className="h-4 w-4" /> {preview.count.toLocaleString()} customers match
+            </span>
+          ) : c.audience_count != null ? (
+            <span className="flex items-center gap-1"><Users className="h-4 w-4" /> {c.audience_count.toLocaleString()} recipients</span>
+          ) : null}
           {isDraft && <Link href="/segments" className="text-primary hover:underline">Refine in Segments →</Link>}
         </div>
+
+        {/* Who's selected — preview the real customers and pick who to contact */}
+        {isDraft && preview && preview.sample.length > 0 && (
+          <div className="mt-3 rounded-lg border">
+            <div className="flex items-center justify-between border-b px-3 py-2 text-xs text-muted-foreground">
+              <span>
+                Selected <b className="text-foreground">{selected.size}</b> of {preview.sample.length} shown
+                {preview.count > preview.sample.length && ` (top ${preview.sample.length} of ${preview.count.toLocaleString()})`}
+              </span>
+              <div className="flex gap-2">
+                <button className="hover:text-foreground" onClick={() => setSelected(new Set(preview.sample.map((s) => s.id)))}>All</button>
+                <button className="hover:text-foreground" onClick={() => setSelected(new Set())}>None</button>
+              </div>
+            </div>
+            <div className="max-h-64 divide-y overflow-y-auto">
+              {preview.sample.map((s) => (
+                <label key={s.id} className="flex cursor-pointer items-center gap-3 px-3 py-1.5 text-sm hover:bg-muted/40">
+                  <input type="checkbox" checked={selected.has(s.id)} onChange={() => toggle(s.id)} className="h-4 w-4" />
+                  <span className="flex-1 truncate">{s.name}</span>
+                  <span className="shrink-0 text-xs text-muted-foreground">{s.email}</span>
+                  <span className="w-20 shrink-0 text-right text-xs text-muted-foreground">₹{s.lifetime_spend.toLocaleString()}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
       </section>
 
       {/* Plan */}
@@ -207,7 +266,12 @@ export default function CampaignDetailPage() {
             {busy === "save" ? <Loader2 className="animate-spin" /> : <Save />} Save draft
           </Button>
           <Button onClick={approve} disabled={busy === "approve"}>
-            {busy === "approve" ? <Loader2 className="animate-spin" /> : <Rocket />} Approve & Launch
+            {busy === "approve" ? <Loader2 className="animate-spin" /> : <Rocket />}
+            {usingSubset
+              ? `Send to ${selected.size} selected`
+              : preview
+                ? `Approve & send to ${preview.count.toLocaleString()}`
+                : "Approve & Launch"}
           </Button>
         </div>
       )}

@@ -3,6 +3,38 @@ from typing import Any, Optional
 from pydantic import BaseModel, field_validator
 
 
+# ── Assistant action routing ─────────────────────────────────────────────────────
+
+class ActionOutput(BaseModel):
+    action: str  # "campaign" | "list" | "answer"
+
+
+class AssistantRoute(BaseModel):
+    """Richer router: the intent plus any entities the action needs (customer, channel, etc.)."""
+    action: str  # campaign | list | answer | history | add_customer | profile
+    customer_name: Optional[str] = None   # the customer the request is about ("this customer")
+    channel: Optional[str] = None         # email | sms | whatsapp | any  (for history filtering)
+    limit: Optional[int] = None           # e.g. "last 2 mails" -> 2
+    new_name: Optional[str] = None        # add_customer: full name to create
+    new_email: Optional[str] = None       # add_customer: email
+    new_phone: Optional[str] = None       # add_customer: phone
+
+
+class PersonalizedMessageOutput(BaseModel):
+    """A ready-to-send, fully-personalized message for ONE customer (no template tokens)."""
+    channel: str                      # email | sms | whatsapp
+    subject: Optional[str] = None     # email only
+    body: str
+    rationale: Optional[str] = None   # one line on why this message suits this customer
+
+
+class CampaignBriefOutput(BaseModel):
+    ready: bool                       # true once we know both the goal/audience AND the offer
+    question: Optional[str] = None    # if not ready, the clarifying question to ask
+    goal: Optional[str] = None        # one-line goal incl. audience
+    offer: Optional[str] = None       # the incentive to give customers
+
+
 # ── Step 1: Intent ─────────────────────────────────────────────────────────────
 
 class IntentOutput(BaseModel):
@@ -20,6 +52,9 @@ ALLOWED_FIELDS = {
     "last_order_at": ["days_ago_gt", "days_ago_lt"],
     "lifetime_spend": ["gte", "lte"],
     "order_count": ["gte", "lte"],
+    "engagement_score": ["gte", "lte"],
+    "favorite_category": ["eq", "neq"],
+    "name": ["starts_with", "contains"],
 }
 
 

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Users, Search } from "lucide-react";
+import { Users, Search, ChevronUp, ChevronDown, ChevronsUpDown } from "lucide-react";
 import { api } from "@/lib/api";
 import type { Customer } from "@/lib/types";
 import { EngagementBadge, formatINR } from "@/components/ai/widgets";
@@ -14,19 +14,65 @@ function daysAgo(iso?: string | null): string {
   return d === 0 ? "Today" : `${d}d ago`;
 }
 
+type SortKey = "name" | "favorite_category" | "order_count" | "lifetime_spend" | "last_order_at" | "engagement_score";
+type SortDir = "asc" | "desc";
+
+const COLUMNS: { key: SortKey; label: string; align: "left" | "right" | "center" }[] = [
+  { key: "name", label: "Customer", align: "left" },
+  { key: "favorite_category", label: "Category", align: "left" },
+  { key: "order_count", label: "Orders", align: "right" },
+  { key: "lifetime_spend", label: "Lifetime", align: "right" },
+  { key: "last_order_at", label: "Last order", align: "left" },
+  { key: "engagement_score", label: "Engagement", align: "center" },
+];
+
+function sortValue(c: Customer, key: SortKey): string | number {
+  switch (key) {
+    case "name": return c.name.toLowerCase();
+    case "favorite_category": return (c.favorite_category ?? "").toLowerCase();
+    case "order_count": return c.order_count;
+    case "lifetime_spend": return c.lifetime_spend;
+    case "engagement_score": return c.engagement_score;
+    case "last_order_at": return c.last_order_at ? new Date(c.last_order_at).getTime() : 0;
+  }
+}
+
 export default function CustomersPage() {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
+  const [sort, setSort] = useState<{ key: SortKey; dir: SortDir } | null>(null);
 
+  // Search server-side (debounced) so it spans ALL customers, not just a loaded page.
   useEffect(() => {
-    api.listCustomers({ limit: 200 }).then(setCustomers).catch(console.error).finally(() => setLoading(false));
-  }, []);
+    let cancelled = false;
+    setLoading(true);
+    const t = setTimeout(() => {
+      api
+        .listCustomers({ limit: 200, q: q.trim() || undefined })
+        .then((rows) => { if (!cancelled) setCustomers(rows); })
+        .catch(console.error)
+        .finally(() => { if (!cancelled) setLoading(false); });
+    }, 250);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [q]);
 
-  const filtered = useMemo(() => {
-    const t = q.toLowerCase();
-    return customers.filter((c) => c.name.toLowerCase().includes(t) || (c.email ?? "").toLowerCase().includes(t));
-  }, [customers, q]);
+  function toggleSort(key: SortKey) {
+    setSort((prev) =>
+      prev?.key === key ? { key, dir: prev.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" },
+    );
+  }
+
+  const sorted = useMemo(() => {
+    if (!sort) return customers;
+    const mult = sort.dir === "asc" ? 1 : -1;
+    return [...customers].sort((a, b) => {
+      const va = sortValue(a, sort.key);
+      const vb = sortValue(b, sort.key);
+      if (typeof va === "string" && typeof vb === "string") return va.localeCompare(vb) * mult;
+      return ((va as number) - (vb as number)) * mult;
+    });
+  }, [customers, sort]);
 
   return (
     <div className="space-y-6">
@@ -52,23 +98,45 @@ export default function CustomersPage() {
         <table className="w-full text-sm">
           <thead className="border-b bg-muted/40 text-left text-xs uppercase tracking-wide text-muted-foreground">
             <tr>
-              <th className="px-4 py-3 font-medium">Customer</th>
-              <th className="px-4 py-3 font-medium">Category</th>
-              <th className="px-4 py-3 text-right font-medium">Orders</th>
-              <th className="px-4 py-3 text-right font-medium">Lifetime</th>
-              <th className="px-4 py-3 font-medium">Last order</th>
-              <th className="px-4 py-3 text-center font-medium">Engagement</th>
+              {COLUMNS.map((col) => {
+                const active = sort?.key === col.key;
+                const justify =
+                  col.align === "right" ? "justify-end" : col.align === "center" ? "justify-center" : "justify-start";
+                const thAlign =
+                  col.align === "right" ? "text-right" : col.align === "center" ? "text-center" : "";
+                return (
+                  <th key={col.key} className={`px-4 py-3 font-medium ${thAlign}`}>
+                    <button
+                      type="button"
+                      onClick={() => toggleSort(col.key)}
+                      title={`Sort by ${col.label}`}
+                      className={`inline-flex w-full items-center gap-1 uppercase tracking-wide transition-colors hover:text-foreground ${justify} ${active ? "text-foreground" : ""}`}
+                    >
+                      {col.label}
+                      {active ? (
+                        sort!.dir === "asc" ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />
+                      ) : (
+                        <ChevronsUpDown className="h-3.5 w-3.5 opacity-40" />
+                      )}
+                    </button>
+                  </th>
+                );
+              })}
             </tr>
           </thead>
           <tbody className="divide-y">
             {loading ? (
               <tr><td colSpan={6} className="px-4 py-10 text-center text-muted-foreground">Loading customers…</td></tr>
-            ) : filtered.length === 0 ? (
+            ) : sorted.length === 0 ? (
               <tr><td colSpan={6} className="px-4 py-10 text-center text-muted-foreground">
-                No customers. Seed demo data with <code className="rounded bg-muted px-1">POST /admin/seed</code>.
+                {q.trim() ? (
+                  <>No customers match “{q.trim()}”.</>
+                ) : (
+                  <>No customers. Seed demo data with <code className="rounded bg-muted px-1">POST /admin/seed</code>.</>
+                )}
               </td></tr>
             ) : (
-              filtered.map((c) => (
+              sorted.map((c) => (
                 <tr key={c.id} className="transition-colors hover:bg-muted/30">
                   <td className="px-4 py-3">
                     <Link href={`/customers/${c.id}`} className="font-medium text-foreground hover:text-primary">

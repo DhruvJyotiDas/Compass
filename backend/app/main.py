@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import engine, get_db
 from app.models import Base
-from app.routers import campaigns, customers, events, pipelines, receipts, segments
+from app.routers import assistant, campaigns, customers, events, pipelines, receipts, segments
 from app.routers import (
     accounts,
     activities,
@@ -74,6 +74,7 @@ app.include_router(campaigns.router)
 app.include_router(events.router)
 app.include_router(events.global_router)
 app.include_router(pipelines.router)
+app.include_router(assistant.router)
 app.include_router(receipts.router)
 
 # ── CRM core modules ─────────────────────────────────────────────────────────
@@ -130,6 +131,12 @@ async def startup():
             "ALTER TABLE customers ADD COLUMN IF NOT EXISTS favorite_category VARCHAR(64)"))
         await conn.execute(text(
             "ALTER TABLE customers ADD COLUMN IF NOT EXISTS engagement_score INTEGER NOT NULL DEFAULT 0"))
+        # variant ids from AI plans can be descriptive ("email_vip_offer"), not just "A"/"B".
+        await conn.execute(text(
+            "ALTER TABLE communications ALTER COLUMN variant TYPE VARCHAR(64)"))
+        # direct 1:1 messages have no campaign.
+        await conn.execute(text(
+            "ALTER TABLE communications ALTER COLUMN campaign_id DROP NOT NULL"))
     log.info("Compass CRM started — LLM: %s (%s) · cors: %s",
              settings.llm_model, settings.llm_provider_name, settings.cors_origins)
 
@@ -186,6 +193,15 @@ async def admin_seed(db: AsyncSession = Depends(get_db)):
 async def admin_seed_crm(db: AsyncSession = Depends(get_db)):
     from app.seed.crm import seed_crm
     return await seed_crm(db)
+
+
+@app.post("/admin/seed-crm-modules", dependencies=[Depends(_require_admin)])
+async def admin_seed_crm_modules(db: AsyncSession = Depends(get_db)):
+    """Fill the catalog/sales/support/data-tools modules for the existing demo org
+    (products, price books, quotes, sales orders, invoices, POs, cases, KB, custom
+    fields) WITHOUT wiping leads/deals/accounts/contacts. Idempotent."""
+    from app.seed.crm import seed_crm_modules
+    return await seed_crm_modules(db)
 
 
 @app.post("/admin/demo-reset", dependencies=[Depends(_require_admin)])
